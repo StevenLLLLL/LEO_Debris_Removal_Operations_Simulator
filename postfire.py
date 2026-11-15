@@ -1,8 +1,8 @@
 """
 C
 
-When there is an effective solution, calculate the post-launch effects in the simulation, including recoil, orbital
-changes, and whether the compensation budget is sufficient, and returns the post-launch report.
+Assess recoil, orbital changes, and the velocity correction needed for
+immediate compensation after a simulated net release.
 """
 
 """Assess the immediate recoil in a simulated net release."""
@@ -21,7 +21,9 @@ EARTH_MEAN_RADIUS_M = 6_371_000.0
 
 @dataclass(frozen=True)
 class ReleaseRecoil:
-    """Velocity vectors in the same coordinate frame as the input."""
+    """
+    Velocity vectors in the same coordinate frame as the input.
+    """
 
     recoil_delta_v_mps: np.ndarray  # How much did the recoil change the satellite's speed
     servicer_velocity_after_mps: np.ndarray  # full speed of the satellite after recoil
@@ -39,6 +41,10 @@ class OrbitAltitudes:
 
 @dataclass(frozen=True)
 class OrbitAltitudeChange:
+    """
+    Heights above the spherical Earth reference surface, in metres.
+    Include both lowest and highest altitude, before and after shooting
+    """
     before: OrbitAltitudes
     after: OrbitAltitudes
 
@@ -52,19 +58,11 @@ class OrbitAltitudeChange:
 
 
 @dataclass(frozen=True)
-class CompensationBudget:
-    """Delta-v budget for immediate recoil compensation, in metres per second."""
+class RecoilCompensation:
+    """Immediate velocity correction in the recoil vector's coordinate frame."""
 
+    correction_delta_v_mps: np.ndarray
     required_delta_v_mps: float
-    available_delta_v_mps: float
-
-    @property
-    def margin_mps(self) -> float:
-        return self.available_delta_v_mps - self.required_delta_v_mps
-
-    @property
-    def budget_ok(self) -> bool:
-        return self.margin_mps >= 0.0
 
 
 def validate_postfire_inputs(
@@ -217,23 +215,18 @@ def compare_release_orbit(
     )
 
 
-def check_compensation_budget(
-    recoil: ReleaseRecoil,
-    available_delta_v_mps: float,
-) -> CompensationBudget:
-    """Check the budget for an impulse that immediately cancels recoil."""
-    if not isfinite(available_delta_v_mps) or available_delta_v_mps < 0:
-        raise ValueError("Available delta-v must be finite and non-negative (m/s).")
-
+def calculate_recoil_compensation(recoil: ReleaseRecoil) -> RecoilCompensation:
+    """Return the change in velocity that immediately cancels recoil."""
     recoil_vector = recoil.recoil_delta_v_mps
     if recoil_vector.shape != (3,) or not np.isfinite(recoil_vector).all():
         raise ValueError("Recoil delta-v must contain three finite values.")
 
-    required_delta_v_mps = float(np.linalg.norm(recoil_vector))
+    correction_delta_v_mps = -recoil_vector
+    required_delta_v_mps = float(np.linalg.norm(correction_delta_v_mps))
     if not isfinite(required_delta_v_mps):
         raise ValueError("Required delta-v must be finite (m/s).")
 
-    return CompensationBudget(
-        required_delta_v_mps=required_delta_v_mps,
-        available_delta_v_mps=available_delta_v_mps,
+    return RecoilCompensation(
+        correction_delta_v_mps=correction_delta_v_mps,  # correction direction
+        required_delta_v_mps=required_delta_v_mps,  # length of the vector
     )
