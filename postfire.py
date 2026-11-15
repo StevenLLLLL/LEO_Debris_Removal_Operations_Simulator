@@ -7,12 +7,16 @@ immediate compensation after a simulated net release.
 
 """Assess the immediate recoil in a simulated net release."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import isclose, isfinite
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from data_source import SpaceObject
+
+if TYPE_CHECKING:
+    from firing import PartBResult
 
 
 EARTH_MU_M3_S2 = 3.986004418e14
@@ -272,4 +276,91 @@ def evaluate_postfire(
         recoil=recoil,
         orbit_change=compare_release_orbit(servicer_before, recoil),
         compensation=calculate_recoil_compensation(recoil),
+    )
+
+
+def evaluate_postfire_from_part_b(
+    part_b: "PartBResult",
+    debris_at_fire_km: SpaceObject,
+    *,
+    servicer_mass_after_release_kg: float,
+) -> PostFireReport:
+    """Evaluate B's selected release using A's TEME state at solution.fire_time.
+
+    A's input uses km and km/s. The selected navigation frame supplies the
+    simulated servicer state relative to the target in RSW, in m and m/s.
+    Raise ValueError if the handoff cannot produce a report.
+    """
+    solution = part_b.solution
+    fire_index = part_b.fire_index
+    if solution is None or fire_index is None:
+        raise ValueError(part_b.abort_reason or "Part B found no firing opportunity.")
+    if not solution.converged or not solution.deploy_ok:
+        raise ValueError(solution.message or "Part B has no usable firing solution.")
+    if not 0 <= fire_index < len(part_b.frames):
+        raise ValueError("Part B's firing frame index is out of range.")
+
+    nav_frame = part_b.frames[fire_index]
+    if nav_frame.abort:
+        raise ValueError(nav_frame.abort_reason or "Part B aborted the selected firing frame.")
+    if solution.fire_time is None or debris_at_fire_km.time != solution.fire_time:
+        raise ValueError("The debris TEME state must be evaluated at Part B's firing time.")
+    if debris_at_fire_km.norad_id != part_b.norad_id:
+        raise ValueError("The debris state and Part B result refer to different targets.")
+    if debris_at_fire_km.frame != "TEME":
+        raise ValueError("Part B handoff requires the debris state in TEME.")
+    if not isfinite(servicer_mass_after_release_kg) or servicer_mass_after_release_kg <= 0:
+        raise ValueError("Servicer mass after release must be finite and positive (kg).")
+
+    debris_before = replace(
+        debris_at_fire_km,
+        position=debris_at_fire_km.position * 1000.0,
+        velocity=debris_at_fire_km.velocity * 1000.0,
+    )
+    radius_m = float(np.linalg.norm(debris_before.position))
+    angular_momentum = np.cross(debris_before.position, debris_before.velocity)
+    angular_momentum_norm = float(np.linalg.norm(angular_momentum))
+    if (
+        not isfinite(radius_m)
+        or radius_m <= 0
+        or not isfinite(angular_momentum_norm)
+        or angular_momentum_norm <= 0
+    ):
+        raise ValueError("The debris state must define a valid RSW frame.")
+
+    radial = debris_before.position / radius_m
+    orbit_normal = angular_momentum / angular_momentum_norm
+    along_track = np.cross(orbit_normal, radial)
+    rsw_to_teme = np.column_stack((radial, along_track, orbit_normal))
+    relative_position = rsw_to_teme @ nav_frame.true_rel
+    relative_velocity = rsw_to_teme @ nav_frame.true_vel
+    # Include rotation of the local orbital frame in the reconstructed velocity.
+    frame_angular_velocity = angular_momentum / radius_m**2
+    servicer_velocity = (
+        debris_before.velocity
+        + relative_velocity
+        + np.cross(frame_angular_velocity, relative_position)
+    )
+    servicer_before = SpaceObject(
+        norad_id=0,
+        name="Simulated servicer",
+        time=debris_before.time,
+        position=debris_before.position + relative_position,
+        velocity=servicer_velocity,
+        frame=debris_before.frame,
+    )
+
+    # B gives the net velocity relative to the servicer before recoil. Convert
+    # its speed to the post-release relative speed used by evaluate_postfire.
+    relative_speed_after_release = solution.net_speed * (
+        1.0 + solution.net_mass / servicer_mass_after_release_kg
+    )
+    return evaluate_postfire(
+        servicer_before,
+        debris_before,
+        net_speed_mps=relative_speed_after_release,
+        release_direction=rsw_to_teme @ solution.direction_rsw,
+        direction_frame="TEME",
+        servicer_mass_after_release_kg=servicer_mass_after_release_kg,
+        net_mass_kg=solution.net_mass,
     )
