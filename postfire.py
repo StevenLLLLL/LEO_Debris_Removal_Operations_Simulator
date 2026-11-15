@@ -24,14 +24,14 @@ class ReleaseRecoil:
 
 
 def validate_postfire_inputs(
-    servicer_before: SpaceObject,
-    debris_before: SpaceObject,
+    servicer_before: SpaceObject,  # state of us right before shoot
+    debris_before: SpaceObject,  # debris right before we shoot
     *, # include name for parameters under this
-    net_speed_mps: float,
-    release_direction: np.ndarray,
-    direction_frame: str,
-    servicer_mass_after_release_kg: float,
-    net_mass_kg: float,
+    net_speed_mps: float,  # speed of net when shoot
+    release_direction: np.ndarray,  # [x, y, z] direction of the net
+    direction_frame: str,  # for release_direction
+    servicer_mass_after_release_kg: float, # as is
+    net_mass_kg: float,  # mass of the net we shoot
 ) -> None:
     """
     Raise ValueError when the release inputs violate the handoff contract.
