@@ -5,6 +5,8 @@ When there is an effective solution, calculate the post-launch effects in the si
 changes, and whether the compensation budget is sufficient, and returns the post-launch report.
 """
 
+"""Assess the immediate recoil in a simulated net release."""
+
 from dataclasses import dataclass
 from math import isclose, isfinite
 
@@ -13,38 +15,12 @@ import numpy as np
 from data_source import SpaceObject
 
 
-EARTH_MU_M3_S2 = 3.986004418e14
-EARTH_MEAN_RADIUS_M = 6_371_000.0
-
 @dataclass(frozen=True)
 class ReleaseRecoil:
     """Velocity vectors in the same coordinate frame as the input."""
 
     recoil_delta_v_mps: np.ndarray  # How much did the recoil change the satellite's speed
     servicer_velocity_after_mps: np.ndarray  # full speed of the satellite after recoil
-
-# save the lowest and highest altitude of an orbit
-@dataclass(frozen=True)
-class OrbitAltitudes:
-    """Heights above the spherical Earth reference surface, in metres."""
-
-    perigee_altitude_m: float
-    apogee_altitude_m: float
-
-
-# save altitude before and after shooting
-@dataclass(frozen=True)
-class OrbitAltitudeChange:
-    before: OrbitAltitudes
-    after: OrbitAltitudes
-
-    @property
-    def perigee_change_m(self) -> float:
-        return self.after.perigee_altitude_m - self.before.perigee_altitude_m
-
-    @property
-    def apogee_change_m(self) -> float:
-        return self.after.apogee_altitude_m - self.before.apogee_altitude_m
 
 
 def validate_postfire_inputs(
@@ -126,3 +102,11 @@ def calculate_release_recoil(
     )
 
     total_mass_kg = servicer_mass_after_release_kg + net_mass_kg  # before shooting
+    relative_net_velocity = net_speed_mps * release_direction
+    recoil_delta_v = -(net_mass_kg / total_mass_kg) * relative_net_velocity  # conservation of momentum
+
+    # return change in velocity and velocity after shooting
+    return ReleaseRecoil(
+        recoil_delta_v_mps=recoil_delta_v,
+        servicer_velocity_after_mps=servicer_before.velocity + recoil_delta_v,
+    )
