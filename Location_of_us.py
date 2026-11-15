@@ -21,12 +21,20 @@ This module contains:
 # Lets type hints such as list[...] and tuple[...] work on older Python versions
 from __future__ import annotations
 
+# warnings: report a non-fatal problem (e.g. an eccentric target orbit) without stopping the run
+import warnings
+
+# dataclass: auto-generates the constructor; field(default_factory=...): gives each object its own new array
+# instead of all objects sharing one array
 from dataclasses import dataclass, field
 # Optional[X]: marks a value that may be None (e.g. no sensor reading during a dropout)
 from typing import Optional
 
 # numpy: all matrix and vector calculations
 import numpy as np
+
+# Earth gravitational parameter μ (m^3/s^2), needed to get the orbital rate n from Part A's SpaceObject
+from config import MU_EARTH
 
 # ---------------------------------------------------------------------------
 # Default parameters (can also be overridden by C's config.py and passed in)
@@ -420,6 +428,57 @@ def run_proximity(n: float,
     return frames
 
 
-def run_proximity_for_target(target_state, **kwargs) -> list[NavFrame]:
-    """Convenience wrapper for C: pass A's TargetState directly (only its n is used)."""
-    return run_proximity(target_state.n, **kwargs)
+def mean_motion_from_space_object(space_object) -> float:
+    """
+    Orbital angular rate n of the target, computed from Part A's SpaceObject.
+
+    space_object: Part A's SpaceObject; position in km, velocity in km/s (geocentric TEME frame).
+    Returns n in rad/s.
+    Called by run_proximity_for_target() (and by the tests).
+    Raises ValueError if the input looks like metres or the orbit is not a plausible closed Earth orbit.
+    Warns (UserWarning) if the eccentricity is above 0.03, because CW then becomes less accurate.
+    """
+    # Unit guard: an Earth orbit in km has |r| below about 1e5; larger means A already sent metres
+    if np.linalg.norm(space_object.position) > 1e5:
+        raise ValueError("SpaceObject position looks like metres; expected km "
+                         "(Part A outputs km, Part B converts to m)")
+
+    # Part A gives km and km/s; Part B converts to m and m/s here. Everything inside Part B uses SI units.
+    r = np.asarray(space_object.position, dtype=float) * 1000.0   # km -> m
+    v = np.asarray(space_object.velocity, dtype=float) * 1000.0   # km/s -> m/s
+    r_norm = float(np.linalg.norm(r))
+    v_norm = float(np.linalg.norm(v))
+
+    # Sanity check: |r| must be between just above Earth's surface (6.5e6 m) and 5e7 m
+    if not 6.5e6 <= r_norm <= 5e7:
+        raise ValueError(f"Orbit radius {r_norm:.3e} m is outside the plausible range 6.5e6 to 5e7 m")
+
+    # Vis-viva equation: a = 1 / (2/|r| - |v|²/μ); a non-positive denominator means a <= 0 (not a closed orbit)
+    inv_a = 2.0 / r_norm - v_norm**2 / MU_EARTH
+    if inv_a <= 0:
+        raise ValueError(f"Semi-major axis is not positive (speed {v_norm:.1f} m/s is at or above "
+                         f"escape speed); not a closed orbit")
+    a = 1.0 / inv_a
+
+    # Eccentricity vector e_vec = ((|v|² - μ/|r|) r - (r·v) v) / μ; e = |e_vec| (unitless)
+    e_vec = ((v_norm**2 - MU_EARTH / r_norm) * r - float(np.dot(r, v)) * v) / MU_EARTH
+    e = float(np.linalg.norm(e_vec))
+    # CW assumes a circular target orbit; above e = 0.03 results are less accurate, so warn but keep running
+    if e > 0.03:
+        warnings.warn(f"Target eccentricity {e:.3f} > 0.03; CW model assumes a near-circular orbit, "
+                      f"accuracy reduced")
+
+    # Mean motion: n = sqrt(μ / a³), rad/s
+    return float(np.sqrt(MU_EARTH / a**3))
+
+
+def run_proximity_for_target(space_object, **kwargs) -> list[NavFrame]:
+    """
+    Entry point for C: take Part A's SpaceObject, compute n from it, then call run_proximity().
+
+    space_object: Part A's SpaceObject (position in km, velocity in km/s)
+    **kwargs:     any other run_proximity() argument (steps, faults, seed, ...)
+    Returns the same list of NavFrame as run_proximity() (SI units).
+    Called by C's pipeline.
+    """
+    return run_proximity(mean_motion_from_space_object(space_object), **kwargs)
