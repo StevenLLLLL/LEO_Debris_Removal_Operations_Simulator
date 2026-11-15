@@ -251,7 +251,8 @@ def evaluate_postfire(
     servicer_mass_after_release_kg: float,
     net_mass_kg: float,
 ) -> PostFireReport:
-    """Evaluate a simulated release from two pre-release TEME states.
+    """
+    Evaluate a simulated release from two pre-release TEME states.
 
     Positions are in metres and velocities are in metres per second. The
     release direction is a TEME unit vector, and net speed is relative to the
