@@ -1,3 +1,6 @@
 """
-Put all shared parameters in this file, make sure everyone can get what they need in this file.a
+All
+
+Unify simulation parameters and check thresholds, such as default retention distance, data age upper limit, deviation
+upper limit, satellite mass and compensation budget.
 """
