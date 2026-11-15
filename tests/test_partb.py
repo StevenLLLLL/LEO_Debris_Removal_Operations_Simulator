@@ -20,7 +20,7 @@ import pytest
 from data_source import SpaceObject
 from firing import (DEBRIS_RADIUS_M, HOLD_POINT, NET_RADIUS_M, CWKalmanFilter, SensorFaults,
                     cw_derivative, cw_stm, cw_targeting_velocity, mean_motion_from_space_object,
-                    miss_distance, net_speed_from_energy, propagate, run_proximity,
+                    miss_distance, net_speed_from_energy, cw_propagate, run_proximity,
                     run_proximity_for_target, solve_firing, solve_time_of_flight)
 
 # rad/s, orbital angular rate near ISS altitude (period ~92.6 min);
@@ -42,7 +42,7 @@ def test_vbar_point_is_stationary():
     # state = (x, y, z, vx, vy, vz): 10 m behind the target, not moving
     s0 = np.array([0.0, -10.0, 0.0, 0.0, 0.0, 0.0])
     for t in (1.0, 100.0, 3000.0):
-        assert np.allclose(propagate(s0, N_ISS, t), s0)
+        assert np.allclose(cw_propagate(s0, N_ISS, t), s0)
 
 
 # Checks: with vy0 = -2*n*x0 the relative orbit is a closed ellipse and returns to the start after one period.
@@ -51,7 +51,7 @@ def test_closed_ellipse_returns_after_one_period():
     x0 = 5.0                                             # m, start 5 m above the target
     s0 = np.array([x0, 0.0, 1.0, 0.0, -2 * N_ISS * x0, 0.0])
     period = 2 * np.pi / N_ISS                           # s, one full orbit
-    assert np.allclose(propagate(s0, N_ISS, period), s0, atol=1e-6)
+    assert np.allclose(cw_propagate(s0, N_ISS, period), s0, atol=1e-6)
 
 
 # Checks: PHI(30 s) equals PHI(10 s) @ PHI(20 s).
@@ -74,7 +74,7 @@ def test_stm_matches_rk4_integration():
         k3 = cw_derivative(s_rk + h / 2 * k2, N_ISS)
         k4 = cw_derivative(s_rk + h * k3, N_ISS)
         s_rk = s_rk + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
-    assert np.allclose(propagate(s, N_ISS, total), s_rk, atol=1e-6)
+    assert np.allclose(cw_propagate(s, N_ISS, total), s_rk, atol=1e-6)
 
 
 # ---------------- Group 2: Kalman filter and proximity loop ----------------

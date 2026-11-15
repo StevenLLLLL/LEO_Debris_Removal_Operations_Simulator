@@ -72,7 +72,7 @@ def cw_stm(n: float, dt: float) -> np.ndarray:
     n:  target orbital angular rate (rad/s)
     dt: propagation time (s)
     Returns Φ(dt) (6x6, mixed units); new state = Φ(dt) @ old state, state order (x, y, z, vx, vy, vz) in m and m/s.
-    Called by propagate(), CWKalmanFilter.predict(), and firing.py (targeting and miss verification).
+    Called by cw_propagate(), CWKalmanFilter.predict(), and section ⑤ (targeting and miss verification).
 
     Valid when the target orbit is near-circular and the relative distance is much smaller than the orbit radius
     (very accurate within a few km).
@@ -122,9 +122,10 @@ def cw_stm(n: float, dt: float) -> np.ndarray:
     return phi
 
 
-def propagate(state: np.ndarray, n: float, dt: float) -> np.ndarray:
+def cw_propagate(state: np.ndarray, n: float, dt: float) -> np.ndarray:
     """
     Push the current state forward by dt seconds using the Φ table.
+    CW relative propagation; not to be confused with the SGP4 module propagate.py (Part A).
 
     state: relative state [x, y, z, vx, vy, vz] (m, m/s)
     n:     target orbital angular rate (rad/s)
@@ -390,7 +391,7 @@ def run_proximity(n: float,
 
         # Step 1: move the true position and the filter forward by one step (skip at t = 0)
         if k > 0:
-            true_state = propagate(true_state, n, dt)   # true motion
+            true_state = cw_propagate(true_state, n, dt)   # true motion
             kf.predict(dt)                              # filter prediction
 
         # Step 2: take a sensor reading of the true position
