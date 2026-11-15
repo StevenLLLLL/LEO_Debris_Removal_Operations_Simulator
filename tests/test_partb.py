@@ -10,6 +10,10 @@ Four groups:
 
 # Standard library: datetime / timezone build a UTC time for Part A's SpaceObject
 from datetime import datetime, timezone
+# csv / math / warnings: read every record of Part A's debris file, 2π for rev/day → rad/s, silence expected warnings
+import csv
+import math
+import warnings
 
 # Third-party: numpy for arrays and numerical comparison (np.allclose tolerates rounding error);
 # pytest is the test runner, pytest.approx compares floats with a tolerance
@@ -21,7 +25,7 @@ from data_source import SpaceObject
 from firing import (DEBRIS_RADIUS_M, HOLD_POINT, NET_RADIUS_M, CWKalmanFilter, SensorFaults,
                     cw_derivative, cw_stm, cw_targeting_velocity, mean_motion_from_space_object,
                     miss_distance, net_speed_from_energy, cw_propagate, run_proximity,
-                    run_proximity_for_target, solve_firing, solve_time_of_flight)
+                    run_part_b, run_proximity_for_target, solve_firing, solve_time_of_flight)
 
 # rad/s, orbital angular rate near ISS altitude (period ~92.6 min);
 # inside the range of our Cosmos 2251 debris data (0.00096-0.00116 rad/s)
@@ -297,3 +301,74 @@ def test_deploy_time_check():
 def test_capture_margin_formula():
     sol = solve_firing(_hold_point_frame(), N_ISS)
     assert sol.capture_margin == pytest.approx(NET_RADIUS_M - DEBRIS_RADIUS_M - sol.predicted_miss)
+
+
+# ---------------- Group 5: Part A output to Part B ----------------
+
+def _part_a_state(norad_id=33757):
+    """Real Part A output: the CSV record and app.calculate_state() at the record's EPOCH (UTC); skipped without sgp4."""
+    pytest.importorskip("sgp4")
+    import app
+    record = app.find_omm_record(app.CSV_PATH, norad_id)
+    epoch = datetime.fromisoformat(record["EPOCH"]).replace(tzinfo=timezone.utc)
+    return record, app.calculate_state(record, epoch)
+
+
+# Checks: for debris 33757, run_part_b's n is within 1% of the catalogue MEAN_MOTION × 2π / 86400, and norad_id / name pass through.
+# Why: an independent value from the CSV confirms the km -> m conversion and vis-viva on real SGP4 output.
+def test_part_a_state_gives_catalogue_mean_motion():
+    record, obj = _part_a_state()
+    result = run_part_b(obj)
+    n_catalogue = float(record["MEAN_MOTION"]) * 2 * math.pi / 86400
+    assert result.n == pytest.approx(n_catalogue, rel=0.01)
+    assert result.norad_id == 33757
+    assert result.name == record["OBJECT_NAME"]
+
+
+# Checks: with a fault-free sensor, run_part_b finds a firing opportunity with capture_margin > 0, deploy_ok and a UTC fire time.
+# Why: proves the whole chain from Part A's real state to a usable firing solution works end to end.
+def test_part_a_state_gives_firing_opportunity():
+    _, obj = _part_a_state()
+    result = run_part_b(obj)
+    assert result.fire_index is not None
+    assert result.solution.capture_margin > 0
+    assert result.solution.deploy_ok
+    assert result.solution.fire_time.tzinfo is not None
+
+
+# Checks: a SpaceObject whose frame is not "TEME" is rejected with ValueError.
+# Why: vis-viva needs a geocentric inertial state; silently accepting another frame would give a wrong n.
+def test_non_teme_state_is_rejected():
+    obj = _space_object([6778.0, 0.0, 0.0], [0.0, 7.67, 0.0])
+    obj.frame = "RSW"
+    with pytest.raises(ValueError, match="TEME"):
+        run_part_b(obj)
+
+
+# Checks: a 30 s forced dropout from t = 0 gives no firing opportunity and a non-empty abort_reason.
+# Why: C must receive "do not fire" together with the reason when the sensor fails. The dropout starts at 0 s
+#      because with a working sensor the very first frame already qualifies, so a later dropout would never be reached.
+def test_long_dropout_gives_no_opportunity():
+    _, obj = _part_a_state()
+    result = run_part_b(obj, faults=SensorFaults(force_dropout_start=0, force_dropout_seconds=30))
+    assert result.fire_index is None
+    assert result.solution is None
+    assert result.abort_reason != ""
+
+
+# Checks: every debris record in Part A's CSV goes through app.calculate_state() and run_part_b() without errors.
+# Why: real catalogue data includes eccentric and decaying orbits; the entry point must handle all of them (warnings allowed).
+def test_all_catalogue_debris_run_through_part_b():
+    pytest.importorskip("sgp4")
+    import app
+    with app.CSV_PATH.open(encoding="utf-8-sig", newline="") as file:
+        records = list(csv.DictReader(file))
+    assert records
+    for record in records:
+        epoch = datetime.fromisoformat(record["EPOCH"]).replace(tzinfo=timezone.utc)
+        obj = app.calculate_state(record, epoch)
+        # Eccentricity warnings are expected for some debris and are not failures here
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            result = run_part_b(obj)
+        assert result.norad_id == int(record["NORAD_CAT_ID"])
