@@ -10,11 +10,12 @@ from scipy.spatial.transform import Rotation
 
 @dataclass
 class SpaceObject:
+    norad_id:int
     name:str        #name of object
     time:datetime   #UTC time
     position:np.ndarray     #3 dimention cordinary
     velocity:np.ndarray     
-    orientation:np.ndarray 
+    orientation:np.ndarray | None = None
     frame: str = "TEME"
 
     def __post_init__(self):
