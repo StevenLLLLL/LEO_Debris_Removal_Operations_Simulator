@@ -1,10 +1,5 @@
-"""
-All
+"""Shared parameters for the debris capture"""
 
-Unify simulation parameters and check thresholds, such as default retention distance, data age upper limit, deviation
-upper limit, satellite mass and compensation budget.
-"""
-# numpy: needed for the HOLD_POINT vector; config.py imports no project modules
 import numpy as np
 
 # Earth gravitational parameter (m^3/s^2), SI units
@@ -39,3 +34,14 @@ LAUNCHER_ENERGY_J = 400.0
 # Debris radius (m), assumed, because CelesTrak orbit data has no object size
 DEBRIS_RADIUS_M = 0.5
 T_MIN, T_MAX = 1e-3, 5.0     # s, search range for the net's time of flight (no solution if it needs longer)
+
+# Part C: demo assumptions for the servicer immediately after net release.
+# The mass supplied to the app scales this uniform cube's inertia tensor.
+SIM_SERVICER_CUBE_SIDE_M = 1.0
+SIM_SERVICER_INERTIA_PER_KG_BODY_M2 = (SIM_SERVICER_CUBE_SIDE_M**2 / 6.0) * np.eye(3)
+
+# Offset from the post-release centre of mass to the launcher, in body axes.
+SIM_SERVICER_RELEASE_OFFSET_BODY_M = np.array([0.5, 0.1, 0.0])
+
+# Demo attitude at release. Identity quaternion means body axes align with TEME.
+SIM_SERVICER_BODY_TO_TEME_QUAT_XYZW = np.array([0.0, 0.0, 0.0, 1.0])

@@ -4,7 +4,6 @@ B
 All of B's code goes here
 """
 
-# Lets type hints such as list[...], tuple[...] and dict[...] work on older Python versions
 from __future__ import annotations
 
 # warnings: report a non-fatal problem (e.g. an eccentric target orbit) without stopping the run
@@ -774,17 +773,18 @@ def first_firing_opportunity(frames: list[NavFrame], n: float,
                              net_speed: float = DEFAULT_NET_SPEED,
                              min_fire_time_s: float = SETTLE_TIME_S) -> tuple[Optional[int], Optional[FiringSolution]]:
     """
-    Scan the navigation frames from the start and return the first one that is safe to fire from.
+    Return the first navigation frame that meets the simulated capture criteria.
 
     frames:    NavFrame list from run_proximity() (one per second)
     n:         target orbital angular rate (rad/s)
     epoch:     UTC start time of the run (Part A's SpaceObject.time); fire time = epoch + frame.t
     net_speed: launcher speed (m/s)
     min_fire_time_s: earliest allowed fire time (s); earlier frames are skipped (not fired from, but not an abort)
-    A frame qualifies when: t >= min_fire_time_s, not aborted, converged, deploy_ok, and
-    NET_RADIUS_M - DEBRIS_RADIUS_M - miss_uncertainty > 0.
-    miss_uncertainty (3σ) is used instead of predicted_miss, because predicted_miss needs the simulation's
-    true state, which a real satellite does not have.
+    A frame qualifies after settling if the solution converges, the net can
+    fully deploy, and both the 3-sigma clearance and the finite simulated
+    capture margin are positive. The simulated margin uses the simulation's
+    true state. If one frame fails a check, keep scanning until an abort or
+    the end of the window.
     Returns (frame index, FiringSolution), or (None, None) if an abort happens first or no frame qualifies.
     Called by run_part_b().
     """
@@ -798,8 +798,14 @@ def first_firing_opportunity(frames: list[NavFrame], n: float,
         if frame.t < min_fire_time_s:
             continue
         sol = solve_firing(frame, n, epoch=epoch, net_speed=net_speed)
-        # Real-mission capture check: the 3σ position error must still fit inside the net around the debris
-        if sol.converged and sol.deploy_ok and NET_RADIUS_M - DEBRIS_RADIUS_M - sol.miss_uncertainty > 0:
+        uncertainty_clearance_m = NET_RADIUS_M - DEBRIS_RADIUS_M - sol.miss_uncertainty
+        if (
+            sol.converged
+            and sol.deploy_ok
+            and uncertainty_clearance_m > 0
+            and np.isfinite(sol.capture_margin)
+            and sol.capture_margin > 0
+        ):
             return i, sol
     return None, None
 
@@ -840,14 +846,14 @@ def run_part_b(space_object: SpaceObject, faults: Optional[SensorFaults] = None,
     n = mean_motion_from_space_object(space_object)
     # Step 2: simulate the proximity phase at the hold point
     frames = run_proximity_for_target(space_object, faults=faults, seed=seed)
-    # Step 3: first frame that is safe to fire from; fire time is measured from Part A's state time
+    # Step 3: find the first eligible simulated capture, relative to Part A's state time
     fire_index, solution = first_firing_opportunity(frames, n, epoch=space_object.time,
                                                     min_fire_time_s=min_fire_time_s)
 
     if fire_index is not None:
         abort_reason = ""
     else:
-        abort_reason = frames[-1].abort_reason or "No frame met the firing criteria within the time window"
+        abort_reason = frames[-1].abort_reason or "No frame met the simulated capture criteria within the time window."
 
     return PartBResult(
         norad_id=space_object.norad_id,
