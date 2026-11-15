@@ -36,9 +36,37 @@ import numpy as np
 # Part B ④: navigation frames, sensor faults, the CW matrix and the proximity simulation
 from Location_of_us import NavFrame, SensorFaults, cw_stm, run_proximity
 
-DEFAULT_NET_SPEED = 20.0     # m/s, desired net speed
-DEFAULT_NET_RADIUS = 2.0     # m, effective radius of the deployed net (parameter, adjust to the actual net spec)
-T_MIN, T_MAX = 1e-3, 5.0     # s, search range for time of flight
+# ---- Net and debris parameters (assumed values; to be moved to config.py once the team agrees) ----
+# Net mass (kg), assumed
+NET_MASS_KG = 2.0
+# Net radius when fully deployed (m), assumed; a capture needs the net to cover the debris
+NET_RADIUS_M = 2.0
+# Time for the net to open fully after launch (s), assumed; a shorter flight hits with a half-open net
+NET_DEPLOY_TIME_S = 0.3
+# Kinetic energy the launcher gives the net (J), assumed; together with the mass it sets the net speed
+LAUNCHER_ENERGY_J = 400.0
+# Debris radius (m), assumed, because CelesTrak orbit data has no object size
+DEBRIS_RADIUS_M = 0.5
+
+
+def net_speed_from_energy(mass_kg: float, energy_j: float) -> float:
+    """
+    Net launch speed from the launcher energy: E = ½ m v²  ⇒  v = sqrt(2E / m).
+
+    mass_kg:  net mass (kg), must be > 0
+    energy_j: kinetic energy given by the launcher (J), must be > 0
+    Returns the net speed relative to the satellite (m/s).
+    Called at import time to set DEFAULT_NET_SPEED, and by the tests.
+    """
+    if mass_kg <= 0 or energy_j <= 0:
+        raise ValueError(f"Net mass and launcher energy must be positive (got {mass_kg} kg, {energy_j} J)")
+    # A heavier net flies slower for the same energy. Mass does not change the aim, because in vacuum
+    # gravity gives every object the same acceleration, so the CW motion of the net does not depend on its mass
+    return float(np.sqrt(2.0 * energy_j / mass_kg))
+
+
+DEFAULT_NET_SPEED = net_speed_from_energy(NET_MASS_KG, LAUNCHER_ENERGY_J)   # m/s, net launch speed (20 m/s)
+T_MIN, T_MAX = 1e-3, 5.0     # s, search range for the net's time of flight (no solution if it needs longer)
 
 
 @dataclass
@@ -49,13 +77,16 @@ class FiringSolution:
     azimuth: float                  # rad, measured from along-track, positive towards cross-track
     elevation: float                # rad, positive towards radial (away from Earth)
     net_speed: float                # m/s, net muzzle speed relative to the satellite
-    time_of_flight: float           # s
-    predicted_miss: float           # m, miss distance checked against the "true state" (simulation verification)
-    converged: bool                 # whether root finding succeeded
-    # ---- extra information beyond the interface; C may choose to display it ----
-    net_velocity_rsw: np.ndarray = None   # m/s, net velocity vector relative to the satellite (C needs it for recoil)
-    miss_uncertainty: float = 0.0         # m, 3σ estimate error; in a real mission only this can be used for the decision
-    message: str = ""
+    time_of_flight: float           # s, time for the net to reach the target
+    predicted_miss: float           # m, miss distance from the simulation's true state (not available in a real mission)
+    converged: bool                 # True if a time of flight was found
+    net_velocity_rsw: Optional[np.ndarray] = None   # m/s, net velocity relative to the satellite (extra field)
+    miss_uncertainty: float = 0.0         # m, 3σ position uncertainty (extra field); real Go / No-Go must use this
+    message: str = ""                     # explanation when there is no solution or the net would not open (extra field)
+    net_mass: float = 0.0                 # kg, net mass used for this solution
+    net_momentum_rsw: Optional[np.ndarray] = None   # N*s, net momentum = mass x velocity relative to satellite; C uses it for recoil: recoil dv = -momentum / satellite mass
+    capture_margin: float = float("nan")  # m, = NET_RADIUS_M - DEBRIS_RADIUS_M - predicted_miss; > 0 means the net covers the debris
+    deploy_ok: bool = False               # True if time_of_flight >= NET_DEPLOY_TIME_S (net fully open on arrival)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +219,11 @@ def direction_to_angles(d: np.ndarray) -> tuple[float, float]:
 
 def solve_firing(frame: NavFrame, n: float,
                  epoch: Optional[datetime] = None,
-                 net_speed: float = DEFAULT_NET_SPEED) -> FiringSolution:
+                 net_speed: float = DEFAULT_NET_SPEED,
+                 net_mass: float = NET_MASS_KG,
+                 net_radius_m: float = NET_RADIUS_M,
+                 debris_radius_m: float = DEBRIS_RADIUS_M,
+                 deploy_time_s: float = NET_DEPLOY_TIME_S) -> FiringSolution:
     """
     Compute the firing solution from one navigation frame (public interface).
 
@@ -217,6 +252,7 @@ def solve_firing(frame: NavFrame, n: float,
             predicted_miss=float("inf"), converged=False,
             net_velocity_rsw=np.zeros(3), miss_uncertainty=3 * frame.est_sigma,
             message="No solution within the time-of-flight search range (net speed too low or distance too large)",
+            net_mass=net_mass, net_momentum_rsw=np.zeros(3),
         )
 
     # Step 3: velocity needed relative to the target, minus the satellite's own velocity,
@@ -230,6 +266,17 @@ def solve_firing(frame: NavFrame, n: float,
     # Step 5: check the shot against the true state to get the real miss distance (simulation only)
     miss = miss_distance(frame.true_rel, frame.true_vel, v_net, n, T)
 
+    # Step 6: net size and mass checks
+    # Momentum the net carries away (N*s); the satellite gets the opposite, which C turns into the recoil dv
+    net_momentum = net_mass * v_net
+    # Capture margin (m): how much room is left after the miss; > 0 means the net still covers the debris
+    capture_margin = net_radius_m - debris_radius_m - miss
+    # The net must be fully open on arrival, so the flight must last at least the deploy time
+    deploy_ok = T >= deploy_time_s
+    message = "" if deploy_ok else (
+        f"Time of flight {T:.2f} s is shorter than net deploy time {deploy_time_s} s; net would not be fully open. "
+        f"Increase stand-off distance or lower net speed.")
+
     return FiringSolution(
         fire_time=fire_time,
         direction_rsw=d,
@@ -241,6 +288,11 @@ def solve_firing(frame: NavFrame, n: float,
         converged=True,
         net_velocity_rsw=v_net,
         miss_uncertainty=3 * frame.est_sigma,
+        message=message,
+        net_mass=net_mass,
+        net_momentum_rsw=net_momentum,
+        capture_margin=capture_margin,
+        deploy_ok=deploy_ok,
     )
 
 
@@ -249,7 +301,8 @@ def solve_firing(frame: NavFrame, n: float,
 # ---------------------------------------------------------------------------
 def monte_carlo(n: float, noise_sigmas, runs: int = 200, steps: int = 60,
                 net_speed: float = DEFAULT_NET_SPEED,
-                net_radius: float = DEFAULT_NET_RADIUS,
+                net_radius_m: float = NET_RADIUS_M,
+                debris_radius_m: float = DEBRIS_RADIUS_M,
                 enforce_abort: bool = True) -> dict[float, dict]:
     """
     Monte Carlo study: how sensor noise affects the capture success rate.
@@ -277,11 +330,13 @@ def monte_carlo(n: float, noise_sigmas, runs: int = 200, steps: int = 60,
             if last.abort and enforce_abort:
                 aborts += 1
                 continue
-            sol = solve_firing(last, n, net_speed=net_speed)
+            sol = solve_firing(last, n, net_speed=net_speed,
+                               net_radius_m=net_radius_m, debris_radius_m=debris_radius_m)
             if not sol.converged:
                 continue
             misses.append(sol.predicted_miss)
-            if sol.predicted_miss < net_radius:
+            # A capture needs the net to cover the debris AND to be fully open on arrival
+            if sol.capture_margin > 0 and sol.deploy_ok:
                 hits += 1
         results[float(sigma)] = {
             "hit_rate": hits / runs,
