@@ -65,6 +65,15 @@ class RecoilCompensation:
     required_delta_v_mps: float
 
 
+@dataclass(frozen=True)
+class PostFireReport:
+    """Immediate release effects and the correction that cancels the recoil."""
+
+    recoil: ReleaseRecoil
+    orbit_change: OrbitAltitudeChange
+    compensation: RecoilCompensation
+
+
 def validate_postfire_inputs(
     servicer_before: SpaceObject,  # state of us right before shoot
     debris_before: SpaceObject,  # debris right before we shoot
@@ -229,4 +238,37 @@ def calculate_recoil_compensation(recoil: ReleaseRecoil) -> RecoilCompensation:
     return RecoilCompensation(
         correction_delta_v_mps=correction_delta_v_mps,  # correction direction
         required_delta_v_mps=required_delta_v_mps,  # length of the vector
+    )
+
+
+def evaluate_postfire(
+    servicer_before: SpaceObject,
+    debris_before: SpaceObject,
+    *,
+    net_speed_mps: float,
+    release_direction: np.ndarray,
+    direction_frame: str,
+    servicer_mass_after_release_kg: float,
+    net_mass_kg: float,
+) -> PostFireReport:
+    """Evaluate a simulated release from two pre-release TEME states.
+
+    Positions are in metres and velocities are in metres per second. The
+    release direction is a TEME unit vector, and net speed is relative to the
+    servicer immediately after release. Orbit changes describe the state
+    immediately after recoil, before compensation.
+    """
+    recoil = calculate_release_recoil(
+        servicer_before,
+        debris_before,
+        net_speed_mps=net_speed_mps,
+        release_direction=release_direction,
+        direction_frame=direction_frame,
+        servicer_mass_after_release_kg=servicer_mass_after_release_kg,
+        net_mass_kg=net_mass_kg,
+    )
+    return PostFireReport(
+        recoil=recoil,
+        orbit_change=compare_release_orbit(servicer_before, recoil),
+        compensation=calculate_recoil_compensation(recoil),
     )
