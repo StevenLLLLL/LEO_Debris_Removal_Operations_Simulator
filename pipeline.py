@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from typing import TYPE_CHECKING, Callable
 
 from firing import run_part_b
@@ -42,7 +43,9 @@ def run_pipeline(
     """Use A's state calculator, B's release selection, and C's report.
 
     The state calculator returns TEME positions in km and velocities in km/s.
-    A's state is evaluated at the start and again at B's selected release time.
+    A's state is evaluated at the start. The release-time state and postfire
+    report are calculated only if B's selected attempt passes the simulated
+    capture checks.
     """
     if start_time_utc.utcoffset() is None:
         return PipelineResult(reason="Start time must include a time zone.")
@@ -63,6 +66,32 @@ def run_pipeline(
             debris_at_start=debris_at_start,
             part_b=part_b,
             reason=part_b.abort_reason or "Part B found no firing opportunity.",
+        )
+
+    if not solution.converged or not solution.deploy_ok:
+        return PipelineResult(
+            debris_at_start=debris_at_start,
+            part_b=part_b,
+            reason=solution.message or (
+                "Part B's selected attempt requires a converged solution and full net deployment."
+            ),
+        )
+
+    capture_margin_m = solution.capture_margin
+    if not isfinite(capture_margin_m):
+        return PipelineResult(
+            debris_at_start=debris_at_start,
+            part_b=part_b,
+            reason="Part B could not determine the simulated capture margin.",
+        )
+    if capture_margin_m <= 0:
+        return PipelineResult(
+            debris_at_start=debris_at_start,
+            part_b=part_b,
+            reason=(
+                f"Part B's selected attempt has a simulated capture margin of {capture_margin_m:.3g} m. "
+                "A positive margin is required."
+            ),
         )
 
     fire_time = solution.fire_time
