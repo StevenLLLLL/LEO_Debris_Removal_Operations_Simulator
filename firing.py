@@ -786,7 +786,8 @@ def solve_firing(frame: NavFrame, n: float,
 # ---------------------------------------------------------------------------
 def first_firing_opportunity(frames: list[NavFrame], n: float,
                              epoch: Optional[datetime] = None,
-                             net_speed: float = DEFAULT_NET_SPEED) -> tuple[Optional[int], Optional[FiringSolution]]:
+                             net_speed: float = DEFAULT_NET_SPEED,
+                             min_fire_time_s: float = SETTLE_TIME_S) -> tuple[Optional[int], Optional[FiringSolution]]:
     """
     Scan the navigation frames from the start and return the first one that is safe to fire from.
 
@@ -794,7 +795,9 @@ def first_firing_opportunity(frames: list[NavFrame], n: float,
     n:         target orbital angular rate (rad/s)
     epoch:     UTC start time of the run (Part A's SpaceObject.time); fire time = epoch + frame.t
     net_speed: launcher speed (m/s)
-    A frame qualifies when: not aborted, converged, deploy_ok, and NET_RADIUS_M - DEBRIS_RADIUS_M - miss_uncertainty > 0.
+    min_fire_time_s: earliest allowed fire time (s); earlier frames are skipped (not fired from, but not an abort)
+    A frame qualifies when: t >= min_fire_time_s, not aborted, converged, deploy_ok, and
+    NET_RADIUS_M - DEBRIS_RADIUS_M - miss_uncertainty > 0.
     miss_uncertainty (3σ) is used instead of predicted_miss, because predicted_miss needs the simulation's
     true state, which a real satellite does not have.
     Returns (frame index, FiringSolution), or (None, None) if an abort happens first or no frame qualifies.
@@ -804,6 +807,11 @@ def first_firing_opportunity(frames: list[NavFrame], n: float,
         # Once the run is aborted it stays aborted (see run_proximity), so stop scanning
         if frame.abort:
             return None, None
+        # The filter needs a settling period to estimate velocity from successive position readings.
+        # Firing before then would rely on the prior velocity (0 +/- 0.1 m/s), and the 3-sigma check only covers position uncertainty.
+        # Reusing SETTLE_TIME_S keeps the firing rule consistent with the abort rule.
+        if frame.t < min_fire_time_s:
+            continue
         sol = solve_firing(frame, n, epoch=epoch, net_speed=net_speed)
         # Real-mission capture check: the 3σ position error must still fit inside the net around the debris
         if sol.converged and sol.deploy_ok and NET_RADIUS_M - DEBRIS_RADIUS_M - sol.miss_uncertainty > 0:
@@ -825,7 +833,7 @@ class PartBResult:
 
 
 def run_part_b(space_object: SpaceObject, faults: Optional[SensorFaults] = None,
-               seed: int = 42) -> PartBResult:
+               seed: int = 42, min_fire_time_s: float = SETTLE_TIME_S) -> PartBResult:
     """
     Part B's single public entry point: from Part A's target state to a firing decision input for C.
 
@@ -833,6 +841,7 @@ def run_part_b(space_object: SpaceObject, faults: Optional[SensorFaults] = None,
                   frame "TEME", time in UTC. Part B converts to m and m/s at this entry point.
     faults:       sensor fault-injection parameters; None means no faults
     seed:         random seed for a reproducible run
+    min_fire_time_s: earliest allowed fire time (s), passed to first_firing_opportunity()
     Returns a PartBResult; all its numbers are in SI units (m, m/s, s, rad), fire_time is UTC.
     Raises ValueError if the frame is not TEME or the state is not a plausible closed Earth orbit.
     Called by C's pipeline.
@@ -847,7 +856,8 @@ def run_part_b(space_object: SpaceObject, faults: Optional[SensorFaults] = None,
     # Step 2: simulate the proximity phase at the hold point
     frames = run_proximity_for_target(space_object, faults=faults, seed=seed)
     # Step 3: first frame that is safe to fire from; fire time is measured from Part A's state time
-    fire_index, solution = first_firing_opportunity(frames, n, epoch=space_object.time)
+    fire_index, solution = first_firing_opportunity(frames, n, epoch=space_object.time,
+                                                    min_fire_time_s=min_fire_time_s)
 
     if fire_index is not None:
         abort_reason = ""

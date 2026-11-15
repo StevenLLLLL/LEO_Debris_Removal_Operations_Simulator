@@ -22,8 +22,8 @@ import pytest
 
 # Project modules: Part A's SpaceObject (real input type) and the Part B functions under test
 from data_source import SpaceObject
-from firing import (DEBRIS_RADIUS_M, HOLD_POINT, NET_RADIUS_M, CWKalmanFilter, SensorFaults,
-                    cw_derivative, cw_stm, cw_targeting_velocity, mean_motion_from_space_object,
+from firing import (DEBRIS_RADIUS_M, HOLD_POINT, NET_RADIUS_M, SETTLE_TIME_S, CWKalmanFilter,
+                    SensorFaults, cw_derivative, cw_stm, cw_targeting_velocity, mean_motion_from_space_object,
                     miss_distance, net_speed_from_energy, cw_propagate, run_proximity,
                     run_part_b, run_proximity_for_target, solve_firing, solve_time_of_flight)
 
@@ -372,3 +372,20 @@ def test_all_catalogue_debris_run_through_part_b():
             warnings.simplefilter("ignore", UserWarning)
             result = run_part_b(obj)
         assert result.norad_id == int(record["NORAD_CAT_ID"])
+
+
+# Checks: with no faults, run_part_b's first firing opportunity is not before SETTLE_TIME_S.
+# Why: the filter needs time to estimate velocity; firing earlier would rely on the prior velocity only.
+def test_no_firing_before_settling_time():
+    _, obj = _part_a_state()
+    result = run_part_b(obj)
+    assert result.fire_index is not None
+    assert result.frames[result.fire_index].t >= SETTLE_TIME_S
+
+
+# Checks: with min_fire_time_s = 0 the same run may fire at frame 0.
+# Why: proves the settling requirement is what delays the shot, i.e. the parameter really takes effect.
+def test_min_fire_time_zero_allows_frame_zero():
+    _, obj = _part_a_state()
+    result = run_part_b(obj, min_fire_time_s=0.0)
+    assert result.fire_index == 0
