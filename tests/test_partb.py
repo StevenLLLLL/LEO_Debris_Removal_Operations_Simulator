@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from relnav import (HOLD_POINT, CWKalmanFilter, SensorFaults, cw_derivative,
-                    cw_stm, propagate, run_proximity)
+from Location_of_us import (HOLD_POINT, CWKalmanFilter, SensorFaults, cw_derivative,
+                            cw_stm, propagate, run_proximity)
 from firing import (cw_targeting_velocity, miss_distance, solve_firing,
                     solve_time_of_flight)
 

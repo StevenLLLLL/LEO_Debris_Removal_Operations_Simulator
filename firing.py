@@ -26,7 +26,7 @@ from typing import Optional
 
 import numpy as np
 
-from relnav import NavFrame, SensorFaults, cw_stm, run_proximity
+from Location_of_us import NavFrame, SensorFaults, cw_stm, run_proximity
 
 DEFAULT_NET_SPEED = 20.0     # m/s, desired net speed
 DEFAULT_NET_RADIUS = 2.0     # m, effective radius of the deployed net (parameter, adjust to the actual net spec)
