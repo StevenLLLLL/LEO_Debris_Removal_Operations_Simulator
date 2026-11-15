@@ -2,12 +2,12 @@
 
 ## Part B: Proximity Navigation & Firing Solution
 
-Note: the module referred to as relnav.py in the planning document is named Location_of_us.py in this repository.
+All Part B code lives in firing.py, as specified by the team's file structure.
 
 ### Files
 
-- `Location_of_us.py` — proximity relative navigation: Clohessy-Wiltshire (CW) state transition matrix, sensor simulation with fault injection (noise, dropout, outliers), a Kalman filter with an outlier gate, and the proximity loop with abort rules (dropout too long, uncertainty too large after settling).
-- `firing.py` — firing solution: CW targeting (velocity needed for the net to reach the target), bisection on time of flight so the net speed matches the launcher speed, miss-distance verification, and a Monte Carlo helper (noise vs capture rate).
+- `firing.py`, section ④ — proximity relative navigation: Clohessy-Wiltshire (CW) state transition matrix, sensor simulation with fault injection (noise, dropout, outliers), a Kalman filter with an outlier gate, and the proximity loop with abort rules (dropout too long, uncertainty too large after settling).
+- `firing.py`, section ⑤ — firing solution: CW targeting (velocity needed for the net to reach the target), bisection on time of flight so the net speed matches the launcher speed, miss-distance verification, and a Monte Carlo helper (noise vs capture rate).
 
 ### Conventions
 
@@ -17,6 +17,10 @@ Note: the module referred to as relnav.py in the planning document is named Loca
 - Input SpaceObject from Part A is in km and km/s; Part B converts to m and m/s at the entry point. All Part B outputs (NavFrame, FiringSolution) are in SI units (m, m/s, s, rad).
 
 ### Public functions
+
+```python
+from firing import run_proximity_for_target, solve_firing
+```
 
 - `run_proximity(n, ...)` → `list[NavFrame]` (one frame per time step; `n` is the target's orbital rate in rad/s, e.g. from `mean_motion_from_space_object()`).
 - `run_proximity_for_target(space_object, ...)` → `list[NavFrame]`: same as `run_proximity`, but takes Part A's `SpaceObject` and computes `n` from its position and velocity (vis-viva, `MU_EARTH` from `config.py`).
@@ -37,7 +41,7 @@ Note: the module referred to as relnav.py in the planning document is named Loca
 
 ### Net parameters
 
-Defined at the top of `firing.py` for now (to be moved to `config.py` once the team agrees). The net speed is derived from mass and energy: `v = sqrt(2E / m)`.
+Defined at the start of section ⑤ in `firing.py` for now (to be moved to `config.py` once the team agrees). The net speed is derived from mass and energy: `v = sqrt(2E / m)`.
 
 | Name | Value | Unit | Note |
 |---|---|---|---|

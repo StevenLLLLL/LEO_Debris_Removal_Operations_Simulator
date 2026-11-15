@@ -18,11 +18,10 @@ import pytest
 
 # Project modules: Part A's SpaceObject (real input type) and the Part B functions under test
 from data_source import SpaceObject
-from Location_of_us import (HOLD_POINT, CWKalmanFilter, SensorFaults, cw_derivative,
-                            cw_stm, mean_motion_from_space_object, propagate, run_proximity,
-                            run_proximity_for_target)
-from firing import (DEBRIS_RADIUS_M, NET_RADIUS_M, cw_targeting_velocity, miss_distance,
-                    net_speed_from_energy, solve_firing, solve_time_of_flight)
+from firing import (DEBRIS_RADIUS_M, HOLD_POINT, NET_RADIUS_M, CWKalmanFilter, SensorFaults,
+                    cw_derivative, cw_stm, cw_targeting_velocity, mean_motion_from_space_object,
+                    miss_distance, net_speed_from_energy, propagate, run_proximity,
+                    run_proximity_for_target, solve_firing, solve_time_of_flight)
 
 # rad/s, orbital angular rate near ISS altitude (period ~92.6 min);
 # inside the range of our Cosmos 2251 debris data (0.00096-0.00116 rad/s)
