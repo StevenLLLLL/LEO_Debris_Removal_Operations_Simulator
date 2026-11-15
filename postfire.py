@@ -40,26 +40,31 @@ def validate_postfire_inputs(
     in metres and velocities are in metres per second. The release direction
     is a unit vector in the same coordinate frame as the two states.
     """
+    # check if time satisfied requirements
     if servicer_before.time.utcoffset() is None or debris_before.time.utcoffset() is None:
         raise ValueError("Both state times must include a time zone.")
     if servicer_before.time != debris_before.time:
         raise ValueError("Servicer and debris states must have the same time.")
 
+    # Check if coordinate and frame satisfied requirements
     if servicer_before.frame != debris_before.frame:
         raise ValueError("Servicer and debris states must use the same coordinate frame.")
     if not servicer_before.frame or direction_frame != servicer_before.frame:
         raise ValueError("Release direction must use the same coordinate frame as the states.")
 
+    # check velocity and location of us and the debris
     for name, state in (("Servicer", servicer_before), ("Debris", debris_before)):
         for field_name, vector in (("position", state.position), ("velocity", state.velocity)):
             if vector.shape != (3,) or not np.isfinite(vector).all():
                 raise ValueError(f"{name} {field_name} must contain three finite values.")
 
+    # check direction of net,  provide only the direction
     if release_direction.shape != (3,) or not np.isfinite(release_direction).all():
         raise ValueError("Release direction must contain three finite values.")
     if not isclose(float(np.linalg.norm(release_direction)), 1.0, rel_tol=1e-6):
         raise ValueError("Release direction must be a unit vector.")
 
+    # check velocity and mass, with net on and off
     if not isfinite(net_speed_mps) or net_speed_mps < 0:
         raise ValueError("Net speed must be finite and non-negative (m/s).")
     if not isfinite(servicer_mass_after_release_kg) or servicer_mass_after_release_kg <= 0:
