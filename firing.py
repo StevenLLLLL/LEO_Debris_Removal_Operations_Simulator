@@ -15,14 +15,19 @@ import warnings
 from dataclasses import dataclass, field
 # datetime / timedelta: fire time = epoch (UTC) + seconds since start
 from datetime import datetime, timedelta
-# Optional[X]: marks a value that may be None (e.g. no sensor reading during a dropout, or no epoch given)
-from typing import Optional
+# Optional[X]: marks a value that may be None (e.g. no sensor reading during a dropout, or no epoch given);
+# TYPE_CHECKING: True only for type checkers, so the import below costs nothing at run time
+from typing import TYPE_CHECKING, Optional
 
 # numpy: all matrix and vector calculations
 import numpy as np
 
 # Earth gravitational parameter μ (m^3/s^2), needed to get the orbital rate n from Part A's SpaceObject
 from config import MU_EARTH
+
+# Part A's SpaceObject, used only in type hints; Part B does not depend on data_source at run time
+if TYPE_CHECKING:
+    from data_source import SpaceObject
 
 
 # ===========================================================================
@@ -773,6 +778,91 @@ def solve_firing(frame: NavFrame, n: float,
         net_momentum_rsw=net_momentum,
         capture_margin=capture_margin,
         deploy_ok=deploy_ok,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Choosing when to fire, and the single entry point for Part A's output
+# ---------------------------------------------------------------------------
+def first_firing_opportunity(frames: list[NavFrame], n: float,
+                             epoch: Optional[datetime] = None,
+                             net_speed: float = DEFAULT_NET_SPEED) -> tuple[Optional[int], Optional[FiringSolution]]:
+    """
+    Scan the navigation frames from the start and return the first one that is safe to fire from.
+
+    frames:    NavFrame list from run_proximity() (one per second)
+    n:         target orbital angular rate (rad/s)
+    epoch:     UTC start time of the run (Part A's SpaceObject.time); fire time = epoch + frame.t
+    net_speed: launcher speed (m/s)
+    A frame qualifies when: not aborted, converged, deploy_ok, and NET_RADIUS_M - DEBRIS_RADIUS_M - miss_uncertainty > 0.
+    miss_uncertainty (3σ) is used instead of predicted_miss, because predicted_miss needs the simulation's
+    true state, which a real satellite does not have.
+    Returns (frame index, FiringSolution), or (None, None) if an abort happens first or no frame qualifies.
+    Called by run_part_b().
+    """
+    for i, frame in enumerate(frames):
+        # Once the run is aborted it stays aborted (see run_proximity), so stop scanning
+        if frame.abort:
+            return None, None
+        sol = solve_firing(frame, n, epoch=epoch, net_speed=net_speed)
+        # Real-mission capture check: the 3σ position error must still fit inside the net around the debris
+        if sol.converged and sol.deploy_ok and NET_RADIUS_M - DEBRIS_RADIUS_M - sol.miss_uncertainty > 0:
+            return i, sol
+    return None, None
+
+
+@dataclass
+class PartBResult:
+    """Everything Part B produces for one target, returned by run_part_b() and read by C and the UI."""
+    norad_id: int                             # NORAD catalogue number, copied from Part A's SpaceObject
+    name: str                                 # object name, copied from Part A's SpaceObject
+    epoch: datetime                           # UTC start time of the run (Part A's SpaceObject.time)
+    n: float                                  # rad/s, target orbital angular rate derived from Part A's state
+    frames: list[NavFrame]                    # one NavFrame per second of the proximity phase (SI units)
+    fire_index: Optional[int]                 # index in frames of the first firing opportunity; None if none
+    solution: Optional[FiringSolution]        # firing solution at fire_index; None if no opportunity
+    abort_reason: str                         # why there is no firing opportunity; empty if one was found
+
+
+def run_part_b(space_object: SpaceObject, faults: Optional[SensorFaults] = None,
+               seed: int = 42) -> PartBResult:
+    """
+    Part B's single public entry point: from Part A's target state to a firing decision input for C.
+
+    space_object: Part A's SpaceObject, e.g. from app.calculate_state(); position in km, velocity in km/s,
+                  frame "TEME", time in UTC. Part B converts to m and m/s at this entry point.
+    faults:       sensor fault-injection parameters; None means no faults
+    seed:         random seed for a reproducible run
+    Returns a PartBResult; all its numbers are in SI units (m, m/s, s, rad), fire_time is UTC.
+    Raises ValueError if the frame is not TEME or the state is not a plausible closed Earth orbit.
+    Called by C's pipeline.
+    """
+    # The vis-viva step needs a geocentric inertial state; TEME is what Part A's SGP4 output uses
+    if space_object.frame != "TEME":
+        raise ValueError(f"Part B needs a TEME state from Part A; got frame '{space_object.frame}'")
+    # space_object.orientation is not used: the relative navigation only needs position and velocity
+
+    # Step 1: orbital rate n (rad/s) from Part A's km / km/s state (unit conversion happens inside)
+    n = mean_motion_from_space_object(space_object)
+    # Step 2: simulate the proximity phase at the hold point
+    frames = run_proximity_for_target(space_object, faults=faults, seed=seed)
+    # Step 3: first frame that is safe to fire from; fire time is measured from Part A's state time
+    fire_index, solution = first_firing_opportunity(frames, n, epoch=space_object.time)
+
+    if fire_index is not None:
+        abort_reason = ""
+    else:
+        abort_reason = frames[-1].abort_reason or "No frame met the firing criteria within the time window"
+
+    return PartBResult(
+        norad_id=space_object.norad_id,
+        name=space_object.name,
+        epoch=space_object.time,
+        n=n,
+        frames=frames,
+        fire_index=fire_index,
+        solution=solution,
+        abort_reason=abort_reason,
     )
 
 
