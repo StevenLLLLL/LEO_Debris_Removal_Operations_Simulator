@@ -2,6 +2,8 @@
 
 ## Part B: Proximity Navigation & Firing Solution
 
+Note: the module referred to as relnav.py in the planning document is named Location_of_us.py in this repository.
+
 ### Files
 
 - `Location_of_us.py` — proximity relative navigation: Clohessy-Wiltshire (CW) state transition matrix, sensor simulation with fault injection (noise, dropout, outliers), a Kalman filter with an outlier gate, and the proximity loop with abort rules (dropout too long, uncertainty too large after settling).
@@ -28,7 +30,10 @@
   - `miss_uncertainty` — 3σ position uncertainty (m). `predicted_miss` is computed from the simulation's true state, which a real mission would not have.
   - `message` — explanation when no solution is found or the net would not be fully open.
   - `net_mass` (kg), `net_momentum_rsw` (N·s, RSW), `capture_margin` (m, `NET_RADIUS_M - DEBRIS_RADIUS_M - predicted_miss`), `deploy_ok` (`time_of_flight >= NET_DEPLOY_TIME_S`).
-- Use net_momentum_rsw for recoil (dv_sat = -net_momentum_rsw / satellite_mass). Go/No-Go should require capture_margin > 0 (using miss_uncertainty in place of predicted_miss for real operations) and deploy_ok.
+- Recoil: net_velocity_rsw is the net velocity relative to the satellite's pre-release velocity.
+  Exact recoil by momentum conservation: dv_sat = -net_momentum_rsw / M_dry, where M_dry is the satellite mass after release (excluding the net).
+  Do not substitute net_velocity_rsw into -(m/(M+m))*u; that formula expects u = post-separation relative speed and would be about m/M off (about 2% for a 2 kg net and 100 kg satellite).
+- Go/No-Go should require capture_margin > 0 (using miss_uncertainty in place of predicted_miss for real operations) and deploy_ok.
 
 ### Net parameters
 
