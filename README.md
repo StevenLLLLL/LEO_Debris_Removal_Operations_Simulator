@@ -1,1 +1,1 @@
-# DeGroote_School_of_Business
+# LEO Debris Removal Operations Simulator
