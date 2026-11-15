@@ -89,6 +89,8 @@ def calculate_release_recoil(
     Net speed is measured relative to the servicer immediately after release.
     The servicer and attached net share a velocity before separation.
     """
+
+    # Make sure data is valid
     validate_postfire_inputs(
         servicer_before,
         debris_before,
@@ -99,10 +101,11 @@ def calculate_release_recoil(
         net_mass_kg=net_mass_kg,
     )
 
-    total_mass_kg = servicer_mass_after_release_kg + net_mass_kg
+    total_mass_kg = servicer_mass_after_release_kg + net_mass_kg  # before shooting
     relative_net_velocity = net_speed_mps * release_direction
-    recoil_delta_v = -(net_mass_kg / total_mass_kg) * relative_net_velocity
+    recoil_delta_v = -(net_mass_kg / total_mass_kg) * relative_net_velocity  # conservation of momentum
 
+    # return change in velocity and velocity after shooting
     return ReleaseRecoil(
         recoil_delta_v_mps=recoil_delta_v,
         servicer_velocity_after_mps=servicer_before.velocity + recoil_delta_v,
