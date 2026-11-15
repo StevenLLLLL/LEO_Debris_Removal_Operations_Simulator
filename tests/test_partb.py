@@ -1,15 +1,17 @@
 """
 Part B tests. Run from the repository root with:  pytest -q
 
-Four groups:
+Six groups:
   1. CW dynamics       - prove the state transition matrix (PHI) is correct
   2. Navigation        - prove the filter tracks, rejects bad data, and aborts correctly
   3. Firing            - prove the aiming formula and end-to-end capture work
   4. Part A input/net  - prove km-to-m conversion, orbit checks, and net mass/size handling
+  5. Part A to Part B   - prove real catalogue states run through Part B
+  6. Close approach     - prove the servicer/debris screening finds and refines the closest approach
 """
 
-# Standard library: datetime / timezone build a UTC time for Part A's SpaceObject
-from datetime import datetime, timezone
+# Standard library: datetime / timezone build a UTC time for Part A's SpaceObject; timedelta bounds the screening window
+from datetime import datetime, timedelta, timezone
 # csv / math / warnings: read every record of Part A's debris file, 2π for rev/day → rad/s, silence expected warnings
 import csv
 import math
@@ -21,11 +23,12 @@ import numpy as np
 import pytest
 
 # Project modules: Part A's SpaceObject (real input type) and the Part B functions under test
-from data_source import SpaceObject
+from data_source import SpaceObject, satellite_record
 from firing import (DEBRIS_RADIUS_M, HOLD_POINT, NET_RADIUS_M, SETTLE_TIME_S, CWKalmanFilter,
                     SensorFaults, cw_derivative, cw_stm, cw_targeting_velocity, mean_motion_from_space_object,
                     miss_distance, net_speed_from_energy, cw_propagate, run_proximity,
-                    run_part_b, run_proximity_for_target, solve_firing, solve_time_of_flight)
+                    run_part_b, run_proximity_for_target, solve_firing, solve_time_of_flight,
+                    find_close_approach)
 
 # rad/s, orbital angular rate near ISS altitude (period ~92.6 min);
 # inside the range of our Cosmos 2251 debris data (0.00096-0.00116 rad/s)
@@ -389,3 +392,78 @@ def test_min_fire_time_zero_allows_frame_zero():
     _, obj = _part_a_state()
     result = run_part_b(obj, min_fire_time_s=0.0)
     assert result.fire_index == 0
+
+
+# ---------------- Group 6: Close approach screening ----------------
+
+# Fixed start time, so the screening results do not depend on when the tests run
+SCREEN_START = datetime(2026, 11, 15, 21, 15, 0, tzinfo=timezone.utc)
+
+
+def _debris_33757() -> dict[str, str]:
+    """OMM record of debris 33757 from Part A's CSV."""
+    pytest.importorskip("sgp4")
+    import app
+    return app.find_omm_record(app.CSV_PATH, 33757)
+
+
+# Checks: our satellite vs debris 33757 with default parameters gives an approach between 100 and 150 km,
+# with a UTC time inside the 3-day window.
+# Why: this is the real crossing-orbit case the screening is built for (true minimum about 130 km).
+def test_close_approach_found_for_real_debris():
+    result = find_close_approach(satellite_record, _debris_33757(), SCREEN_START)
+    assert result is not None
+    assert 100.0 < result.distance_km < 150.0
+    assert result.time.utcoffset() is not None
+    assert SCREEN_START <= result.time <= SCREEN_START + timedelta(days=3)
+
+
+# Checks: the same pair and start time with threshold_km = 20 returns None.
+# Why: approaches farther than the threshold must not be reported.
+def test_close_approach_above_threshold_is_none():
+    assert find_close_approach(satellite_record, _debris_33757(), SCREEN_START, threshold_km=20.0) is None
+
+
+# Checks: the refined distance is within 1 km of a brute-force 1 s scan over the same 3 days.
+# Why: proves the 10 s coarse step plus ternary refinement does not miss or misplace the closest point.
+def test_close_approach_matches_brute_force_scan():
+    pytest.importorskip("sgp4")
+    from sgp4 import omm
+    from sgp4.api import Satrec, jday
+    debris_record = _debris_33757()
+    result = find_close_approach(satellite_record, debris_record, SCREEN_START, threshold_km=1000.0)
+    assert result is not None
+
+    sats = []
+    for record in (satellite_record, debris_record):
+        sat = Satrec()
+        omm.initialize(sat, record)
+        sats.append(sat)
+    jd0, fr0 = jday(2026, 11, 15, 21, 15, 0.0)
+    t = np.arange(0.0, 3 * 86400.0 + 0.5, 1.0)
+    jd = np.full(t.shape, jd0)
+    fr = fr0 + t / 86400.0
+    e1, r1, _ = sats[0].sgp4_array(jd, fr)
+    e2, r2, _ = sats[1].sgp4_array(jd, fr)
+    valid = (e1 == 0) & (e2 == 0)
+    brute_min = np.linalg.norm(r1 - r2, axis=1)[valid].min()
+    assert abs(result.distance_km - brute_min) < 1.0
+
+
+# Checks: a "debris" on our own orbit, 0.1 deg ahead in mean anomaly, is found closer than 20 km.
+# Why: the co-orbital case has an almost constant distance (about 12 km) and no sharp minimum,
+# so it checks that the screening still works when the distance barely changes.
+def test_close_approach_same_orbit_neighbour():
+    pytest.importorskip("sgp4")
+    neighbour = dict(satellite_record, MEAN_ANOMALY="0.1")
+    result = find_close_approach(satellite_record, neighbour, SCREEN_START)
+    assert result is not None
+    assert result.distance_km < 20.0
+
+
+# Checks: a start time without a time zone raises ValueError.
+# Why: a naive datetime is ambiguous; the screening must not silently assume local time or UTC.
+def test_close_approach_naive_time_is_rejected():
+    pytest.importorskip("sgp4")
+    with pytest.raises(ValueError):
+        find_close_approach(satellite_record, _debris_33757(), datetime(2026, 11, 15, 21, 15, 0))

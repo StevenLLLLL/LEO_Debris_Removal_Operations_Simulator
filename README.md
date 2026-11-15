@@ -8,6 +8,7 @@ All Part B code lives in firing.py, as specified by the team's file structure.
 
 - `firing.py`, section ④ — proximity relative navigation: Clohessy-Wiltshire (CW) state transition matrix, sensor simulation with fault injection (noise, dropout, outliers), a Kalman filter with an outlier gate, and the proximity loop with abort rules (dropout too long, uncertainty too large after settling).
 - `firing.py`, section ⑤ — firing solution: CW targeting (velocity needed for the net to reach the target), bisection on time of flight so the net speed matches the launcher speed, miss-distance verification, and a Monte Carlo helper (noise vs capture rate).
+- `firing.py`, section ⑥ — close approach screening: when our satellite and one debris object come closest in the next few days (SGP4).
 
 ### Conventions
 
@@ -43,6 +44,20 @@ result = run_part_b(space_object)   # space_object: output of Part A's calculate
 - `run_proximity(n, ...)` → `list[NavFrame]` (one frame per time step; `n` is the target's orbital rate in rad/s, e.g. from `mean_motion_from_space_object()`).
 - `run_proximity_for_target(space_object, ...)` → `list[NavFrame]`: same as `run_proximity`, but takes Part A's `SpaceObject` and computes `n` from its position and velocity (vis-viva, `MU_EARTH` from `config.py`).
 - `solve_firing(frame, n, epoch=None, net_speed=20.0)` → `FiringSolution`. `epoch` can be `SpaceObject.time` (UTC); the fire time is `epoch + frame.t`.
+
+### Close approach screening
+
+```python
+from firing import find_close_approach
+from data_source import satellite_record
+approach = find_close_approach(satellite_record, debris_record, datetime.now(timezone.utc))
+```
+
+`find_close_approach(servicer_record, debris_record, start_time_utc, days=3.0, step_s=10.0, refine_window_s=300.0, threshold_km=150.0)` takes two OMM dictionaries (same format as `app.find_omm_record()` returns) and a start time that must include a time zone (otherwise `ValueError`). It propagates both objects with SGP4 every 10 s for 3 days, refines every local minimum of the distance within ±5 min by ternary search (to better than 0.1 s), and returns a `CloseApproach` (`time` UTC, `distance_km`, `relative_speed_km_s`) for the closest one if it is under 150 km, otherwise `None`. Time points where SGP4 reports an error are skipped. The defaults are the module constants `SCREEN_DAYS`, `SCREEN_STEP_S`, `SCREEN_REFINE_WINDOW_S` and `SCREEN_THRESHOLD_KM`.
+
+- Why 10 s and not 30 min: our orbit (51.6°) and the Cosmos 2251 debris orbits (about 74°) cross, so the relative speed is about 8 km/s and the objects move about 80 km apart between 10 s samples. A 30 min step misses the closest point: for debris 33757 it gives 429 km, while the true minimum is about 130 km.
+- Why every local minimum: the orbits can come close once per revolution, and the smallest coarse sample is not necessarily next to the smallest true approach, so each minimum is refined and the best refined one is kept.
+- Why SGP4 and not CW for refinement: CW only holds for nearly co-orbital relative motion within a few km (the phase after the hold point in section ④). Crossing orbits hundreds of km apart are far outside that range.
 
 ### Notes for Part C
 

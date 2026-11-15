@@ -13,8 +13,9 @@ import warnings
 # dataclass: auto-generates the constructors (SensorFaults, NavFrame, FiringSolution);
 # field(default_factory=...): gives each object its own new array instead of all objects sharing one array
 from dataclasses import dataclass, field
-# datetime / timedelta: fire time = epoch (UTC) + seconds since start
-from datetime import datetime, timedelta
+# datetime / timedelta: fire time = epoch (UTC) + seconds since start;
+# timezone: convert the close-approach screening start time to UTC
+from datetime import datetime, timedelta, timezone
 # Optional[X]: marks a value that may be None (e.g. no sensor reading during a dropout, or no epoch given);
 # TYPE_CHECKING: True only for type checkers, so the import below costs nothing at run time
 from typing import TYPE_CHECKING, Optional
@@ -908,3 +909,136 @@ def monte_carlo(n: float, noise_sigmas, runs: int = 200, steps: int = 60,
             "mean_miss": float(np.mean(misses)) if misses else float("nan"),
         }
     return results
+
+
+# ===========================================================================
+# Part B ⑥: Close approach screening
+#
+# Purpose: find when our satellite and one debris object come closest to each other in the next few days.
+#
+# Inputs:
+#     Our satellite's orbit:  data_source.satellite_record (inclination 51.6 deg)
+#     The debris orbit:       an OMM record from the CSV (inclination about 74 deg)
+#     Both are OMM dictionaries, the same format that app.find_omm_record() returns.
+#
+# Why the method looks like this:
+#     - The two orbits cross each other, so the relative speed can reach about 8 km/s.
+#       The coarse sampling step must therefore be short (10 s by default). A 30 min step misses the closest
+#       point: checked with real data, 30 min sampling gives 429 km, while the true minimum from 10 s sampling
+#       is about 130 km.
+#     - An approach can happen on every revolution, so every local minimum of the distance is checked,
+#       not only the global minimum of the coarse samples.
+#     - Refinement uses SGP4, not CW. CW only holds for nearly co-orbital relative motion within a few km,
+#       i.e. the phase after the hold point in section ④.
+#
+# All positions are in km (TEME) and velocities in km/s, as SGP4 returns them; times are UTC datetimes.
+# ===========================================================================
+
+SCREEN_DAYS = 3.0               # days to look ahead
+SCREEN_STEP_S = 10.0            # s, coarse sampling step (relative speed ~8 km/s, so ~80 km between samples)
+SCREEN_REFINE_WINDOW_S = 300.0  # s, refine +/- 5 min around each local minimum
+SCREEN_THRESHOLD_KM = 150.0     # km, report only approaches closer than this
+
+# s, the ternary search stops when every search interval is shorter than this
+_SCREEN_TIME_TOL_S = 0.1
+
+
+@dataclass
+class CloseApproach:
+    """Closest approach between our satellite and one debris object, returned by find_close_approach()."""
+    time: datetime                  # UTC time of the closest approach
+    distance_km: float              # km, distance between the two objects at that time
+    relative_speed_km_s: float      # km/s, magnitude of the relative velocity at that time
+
+
+def find_close_approach(servicer_record: dict[str, str], debris_record: dict[str, str],
+                        start_time_utc: datetime, days: float = SCREEN_DAYS,
+                        step_s: float = SCREEN_STEP_S,
+                        refine_window_s: float = SCREEN_REFINE_WINDOW_S,
+                        threshold_km: float = SCREEN_THRESHOLD_KM) -> Optional[CloseApproach]:
+    """
+    Find the closest approach between our satellite and one debris object within the next `days` days.
+
+    servicer_record: OMM dictionary of our satellite (e.g. data_source.satellite_record)
+    debris_record:   OMM dictionary of the debris (same format as app.find_omm_record() returns)
+    start_time_utc:  start of the screening window; must include a time zone
+    days:            length of the screening window (days)
+    step_s:          coarse sampling step (s)
+    refine_window_s: half-width of the refinement window around each local minimum (s)
+    threshold_km:    report only approaches closer than this (km)
+    Returns a CloseApproach if the closest refined distance is below threshold_km, otherwise None.
+    Raises ValueError if start_time_utc has no time zone or a parameter is not positive.
+    Called by the UI / analysis scripts (not used in the main pipeline).
+    """
+    # Imported here, not at the top of the file, so sections ④ and ⑤ still import without sgp4 installed
+    from sgp4 import omm
+    from sgp4.api import Satrec, jday
+
+    if start_time_utc.utcoffset() is None:
+        raise ValueError("start_time_utc must include a time zone.")
+    if days <= 0 or step_s <= 0 or refine_window_s <= 0:
+        raise ValueError("days, step_s and refine_window_s must be greater than 0.")
+
+    start = start_time_utc.astimezone(timezone.utc)
+    servicer = Satrec()
+    omm.initialize(servicer, servicer_record)
+    debris = Satrec()
+    omm.initialize(debris, debris_record)
+
+    # Julian date of the start time; every sample time is this plus t seconds
+    jd0, fr0 = jday(start.year, start.month, start.day, start.hour, start.minute,
+                    start.second + start.microsecond / 1_000_000)
+
+    def states(t: np.ndarray):
+        """Distance (km) and relative velocity (km/s) at times t (s after start); NaN where SGP4 fails."""
+        jd = np.full(t.shape, jd0)
+        fr = fr0 + t / 86400.0
+        e1, r1, v1 = servicer.sgp4_array(jd, fr)
+        e2, r2, v2 = debris.sgp4_array(jd, fr)
+        dist = np.linalg.norm(r1 - r2, axis=1)
+        # A non-zero SGP4 error code makes that time point invalid
+        dist[(e1 != 0) | (e2 != 0)] = np.nan
+        return dist, v1 - v2
+
+    # 1. Coarse sampling over the whole window
+    total_s = days * 86400.0
+    t = np.arange(0.0, total_s + step_s / 2, step_s)
+    dist, _ = states(t)
+
+    # 2. Every local minimum; comparisons with NaN are False, so invalid points never become minima
+    inner = dist[1:-1]
+    is_min = (inner < dist[:-2]) & (inner <= dist[2:])
+    candidates = np.flatnonzero(is_min) + 1
+    if candidates.size == 0:
+        # Distance only rises or only falls over the window: fall back to the smallest valid sample
+        if np.all(np.isnan(dist)):
+            return None
+        candidates = np.array([int(np.nanargmin(dist))])
+
+    # 3. Ternary search within +/- refine_window_s of every minimum, all minima at once (one SGP4 call per side)
+    lo = np.clip(t[candidates] - refine_window_s, 0.0, total_s)
+    hi = np.clip(t[candidates] + refine_window_s, 0.0, total_s)
+    while np.max(hi - lo) > _SCREEN_TIME_TOL_S:
+        m1 = lo + (hi - lo) / 3
+        m2 = hi - (hi - lo) / 3
+        d1, _ = states(m1)
+        d2, _ = states(m2)
+        # The minimum cannot lie beyond the larger of the two inner points
+        left = d1 < d2
+        hi = np.where(left, m2, hi)
+        lo = np.where(left, lo, m1)
+
+    t_best = (lo + hi) / 2
+    d_best, dv_best = states(t_best)
+    if np.all(np.isnan(d_best)):
+        return None
+
+    # 4. The closest of all refined approaches
+    k = int(np.nanargmin(d_best))
+    if not d_best[k] < threshold_km:
+        return None
+    return CloseApproach(
+        time=start + timedelta(seconds=float(t_best[k])),
+        distance_km=float(d_best[k]),
+        relative_speed_km_s=float(np.linalg.norm(dv_best[k])),
+    )
