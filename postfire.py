@@ -1,8 +1,8 @@
 """
 C
 
-Assess recoil, orbital changes, and the velocity correction needed for
-immediate compensation after a simulated net release.
+Assess recoil, orbital changes, and translational and rotational corrections
+after a simulated net release.
 """
 
 """Assess the immediate recoil in a simulated net release."""
@@ -12,6 +12,7 @@ from math import isclose, isfinite
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from data_source import SpaceObject
 
@@ -72,6 +73,24 @@ class RecoilCompensation:
 
 
 @dataclass(frozen=True)
+class AttitudeInputs:
+    """Servicer properties at release, with inertia and offset about its post-release centre of mass."""
+
+    release_offset_body_m: np.ndarray
+    inertia_body_kg_m2: np.ndarray
+    body_to_teme_quat_xyzw: np.ndarray
+
+
+@dataclass(frozen=True)
+class AttitudeCompensation:
+    """Instantaneous change and correction in the servicer body frame."""
+
+    angular_velocity_change_body_rad_s: np.ndarray
+    correction_delta_omega_body_rad_s: np.ndarray
+    correction_angular_impulse_body_nms: np.ndarray
+
+
+@dataclass(frozen=True)
 class PostFireReport:
     """
     Immediate release effects and the correction that cancels the recoil.
@@ -80,6 +99,7 @@ class PostFireReport:
     recoil: ReleaseRecoil
     orbit_change: OrbitAltitudeChange
     compensation: RecoilCompensation
+    attitude_compensation: AttitudeCompensation | None = None
 
 
 def validate_postfire_inputs(
@@ -249,6 +269,53 @@ def calculate_recoil_compensation(recoil: ReleaseRecoil) -> RecoilCompensation:
     )
 
 
+def calculate_attitude_compensation(
+    recoil: ReleaseRecoil,
+    attitude: AttitudeInputs,
+    *,
+    servicer_mass_after_release_kg: float,
+) -> AttitudeCompensation:
+    """Estimate the spin change from an off-centre TEME recoil impulse.
+
+    The quaternion rotates body vectors into TEME. The return values use body
+    axes at the release instant. Compensation cancels the change in angular
+    velocity in the same instant as the impulse.
+    """
+    if not isfinite(servicer_mass_after_release_kg) or servicer_mass_after_release_kg <= 0:
+        raise ValueError("Servicer mass after release must be finite and positive (kg).")
+
+    offset = np.asarray(attitude.release_offset_body_m, dtype=float)
+    inertia = np.asarray(attitude.inertia_body_kg_m2, dtype=float)
+    quaternion = np.asarray(attitude.body_to_teme_quat_xyzw, dtype=float)
+    recoil_delta_v = np.asarray(recoil.recoil_delta_v_mps, dtype=float)
+    for name, array, shape in (
+        ("Release offset", offset, (3,)),
+        ("Body inertia tensor", inertia, (3, 3)),
+        ("Body-to-TEME quaternion", quaternion, (4,)),
+        ("Recoil delta-v", recoil_delta_v, (3,)),
+    ):
+        if array.shape != shape or not np.isfinite(array).all():
+            raise ValueError(f"{name} must have shape {shape} and finite values.")
+
+    if not np.allclose(inertia, inertia.T, rtol=1e-9, atol=1e-12):
+        raise ValueError("Body inertia tensor must be symmetric.")
+    try:
+        np.linalg.cholesky(inertia)
+    except np.linalg.LinAlgError as error:
+        raise ValueError("Body inertia tensor must be positive definite.") from error
+
+    rotation = Rotation.from_quat(quaternion)
+    recoil_impulse_body = rotation.apply(recoil_delta_v, inverse=True) * servicer_mass_after_release_kg
+    angular_impulse_body = np.cross(offset, recoil_impulse_body)
+    angular_velocity_change = np.linalg.solve(inertia, angular_impulse_body)
+
+    return AttitudeCompensation(
+        angular_velocity_change_body_rad_s=angular_velocity_change,
+        correction_delta_omega_body_rad_s=-angular_velocity_change,
+        correction_angular_impulse_body_nms=-angular_impulse_body,
+    )
+
+
 def evaluate_postfire(
     servicer_before: SpaceObject,
     debris_before: SpaceObject,
@@ -258,6 +325,7 @@ def evaluate_postfire(
     direction_frame: str,
     servicer_mass_after_release_kg: float,
     net_mass_kg: float,
+    attitude: AttitudeInputs | None = None,
 ) -> PostFireReport:
     """
     Evaluate a simulated release from two pre-release TEME states.
@@ -266,6 +334,7 @@ def evaluate_postfire(
     release direction is a TEME unit vector, and net speed is relative to the
     servicer immediately after release. Orbit changes describe the state
     immediately after recoil, before compensation.
+    Supply attitude inputs to include the instantaneous spin correction.
     """
     recoil = calculate_release_recoil(
         servicer_before,
@@ -276,10 +345,17 @@ def evaluate_postfire(
         servicer_mass_after_release_kg=servicer_mass_after_release_kg,
         net_mass_kg=net_mass_kg,
     )
+    attitude_compensation = None
+    if attitude is not None:
+        attitude_compensation = calculate_attitude_compensation(
+            recoil, attitude, servicer_mass_after_release_kg=servicer_mass_after_release_kg,
+        )
+
     return PostFireReport(
         recoil=recoil,
         orbit_change=compare_release_orbit(servicer_before, recoil),
         compensation=calculate_recoil_compensation(recoil),
+        attitude_compensation=attitude_compensation,
     )
 
 
@@ -288,11 +364,13 @@ def evaluate_postfire_from_part_b(
     debris_at_fire_km: SpaceObject,
     *,
     servicer_mass_after_release_kg: float,
+    attitude: AttitudeInputs | None = None,
 ) -> PostFireReport:
     """Evaluate B's selected release using A's TEME state at solution.fire_time.
 
     A's input uses km and km/s. The selected navigation frame supplies the
     simulated servicer state relative to the target in RSW, in m and m/s.
+    If supplied, attitude inputs describe the servicer at solution.fire_time.
     Raise ValueError if the handoff cannot produce a report.
     """
     solution = part_b.solution
@@ -367,4 +445,5 @@ def evaluate_postfire_from_part_b(
         direction_frame="TEME",
         servicer_mass_after_release_kg=servicer_mass_after_release_kg,
         net_mass_kg=solution.net_mass,
+        attitude=attitude,
     )
