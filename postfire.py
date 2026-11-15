@@ -63,7 +63,9 @@ class OrbitAltitudeChange:
 
 @dataclass(frozen=True)
 class RecoilCompensation:
-    """Immediate velocity correction in the recoil vector's coordinate frame."""
+    """
+    Immediate velocity correction in the recoil vector's coordinate frame.
+    """
 
     correction_delta_v_mps: np.ndarray
     required_delta_v_mps: float
@@ -71,7 +73,9 @@ class RecoilCompensation:
 
 @dataclass(frozen=True)
 class PostFireReport:
-    """Immediate release effects and the correction that cancels the recoil."""
+    """
+    Immediate release effects and the correction that cancels the recoil.
+    """
 
     recoil: ReleaseRecoil
     orbit_change: OrbitAltitudeChange
