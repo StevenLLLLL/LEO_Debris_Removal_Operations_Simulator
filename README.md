@@ -59,7 +59,7 @@ result = run_part_b(space_object)   # space_object: output of Part A's calculate
 
 ### Net parameters
 
-Defined at the start of section ⑤ in `firing.py` for now (to be moved to `config.py` once the team agrees). The net speed is derived from mass and energy: `v = sqrt(2E / m)`.
+Defined in `config.py` under "Part B: Firing solution and net parameters" (the navigation constants are under "Part B: Location of us"); `DEFAULT_NET_SPEED` stays in `firing.py`. The net speed is derived from mass and energy: `v = sqrt(2E / m)`.
 
 | Name | Value | Unit | Note |
 |---|---|---|---|

@@ -22,8 +22,11 @@ from typing import TYPE_CHECKING, Optional
 # numpy: all matrix and vector calculations
 import numpy as np
 
-# Earth gravitational parameter μ (m^3/s^2), needed to get the orbital rate n from Part A's SpaceObject
-from config import MU_EARTH
+# Earth gravitational parameter μ (m^3/s^2), needed to get the orbital rate n from Part A's SpaceObject,
+# and the Part B constants, which live in config.py so the whole team reads them from one place
+from config import (DEBRIS_RADIUS_M, DEFAULT_DT, DEFAULT_STEPS, GATE_CHI2_3DOF_99, HOLD_POINT,
+                    LAUNCHER_ENERGY_J, MAX_DROPOUT_S, MAX_SIGMA_M, MU_EARTH, NET_DEPLOY_TIME_S,
+                    NET_MASS_KG, NET_RADIUS_M, SETTLE_TIME_S, T_MAX, T_MIN)
 
 # Part A's SpaceObject, used only in type hints; Part B does not depend on data_source at run time
 if TYPE_CHECKING:
@@ -51,19 +54,9 @@ if TYPE_CHECKING:
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Default parameters (can also be overridden by C's config.py and passed in)
+# Default parameters: HOLD_POINT, DEFAULT_DT, DEFAULT_STEPS, MAX_DROPOUT_S, MAX_SIGMA_M, SETTLE_TIME_S and
+# GATE_CHI2_3DOF_99 are defined in config.py ("Part B: Location of us") and imported at the top
 # ---------------------------------------------------------------------------
-HOLD_POINT = np.array([0.0, -10.0, 0.0])  # m, V-bar hold point: 10 m directly behind the target
-
-DEFAULT_DT = 1.0              # s, length of each time step (one sensor reading per step)
-DEFAULT_STEPS = 120           # number of steps (120 s): the longest we wait at the hold point, not a fixed fire time
-MAX_DROPOUT_S = 10.0          # s, continuous dropout longer than this → abort (dead reckoning no longer trusted)
-MAX_SIGMA_M = 1.0             # m, position uncertainty still above this after settling → abort (filter divergence)
-SETTLE_TIME_S = 15.0          # s, filter settling time after start; no uncertainty check before this
-
-# Threshold for "this reading is clearly wrong": chi-square, 3 DOF, 99% critical value.
-# A squared Mahalanobis distance of the innovation above it → bad data
-GATE_CHI2_3DOF_99 = 11.345
 
 
 # ---------------------------------------------------------------------------
@@ -521,17 +514,8 @@ def run_proximity_for_target(space_object, **kwargs) -> list[NavFrame]:
 # All inputs and outputs are in SI units (m, m/s, s, rad); fire_time is a UTC datetime.
 # ===========================================================================
 
-# ---- Net and debris parameters (assumed values; to be moved to config.py once the team agrees) ----
-# Net mass (kg), assumed
-NET_MASS_KG = 2.0
-# Net radius when fully deployed (m), assumed; a capture needs the net to cover the debris
-NET_RADIUS_M = 2.0
-# Time for the net to open fully after launch (s), assumed; a shorter flight hits with a half-open net
-NET_DEPLOY_TIME_S = 0.3
-# Kinetic energy the launcher gives the net (J), assumed; together with the mass it sets the net speed
-LAUNCHER_ENERGY_J = 400.0
-# Debris radius (m), assumed, because CelesTrak orbit data has no object size
-DEBRIS_RADIUS_M = 0.5
+# ---- Net and debris parameters (assumed values): NET_MASS_KG, NET_RADIUS_M, NET_DEPLOY_TIME_S,
+# LAUNCHER_ENERGY_J and DEBRIS_RADIUS_M are defined in config.py ("Part B: Firing solution and net parameters") ----
 
 
 def net_speed_from_energy(mass_kg: float, energy_j: float) -> float:
@@ -551,7 +535,7 @@ def net_speed_from_energy(mass_kg: float, energy_j: float) -> float:
 
 
 DEFAULT_NET_SPEED = net_speed_from_energy(NET_MASS_KG, LAUNCHER_ENERGY_J)   # m/s, net launch speed (20 m/s)
-T_MIN, T_MAX = 1e-3, 5.0     # s, search range for the net's time of flight (no solution if it needs longer)
+# T_MIN, T_MAX (s, time-of-flight search range) are defined in config.py
 
 
 @dataclass
