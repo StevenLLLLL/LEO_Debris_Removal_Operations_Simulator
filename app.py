@@ -27,7 +27,7 @@ def find_omm_record(csv_path: Path, norad_id: int) -> dict[str, str]:
             if record["NORAD_CAT_ID"] == str(norad_id):
                 return record
 
-    raise ValueError(f"NORAD ID not found in CSV {norad_id}。")
+    raise ValueError(f"NORAD ID {norad_id} not found in CSV.")
 
 def calculate_state(record: dict[str, str], time_utc: datetime) -> SpaceObject:
     """Use SGP4 to calculate the geocentric TEME position

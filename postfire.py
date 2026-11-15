@@ -5,6 +5,8 @@ Assess recoil, orbital changes, and translational and rotational corrections
 after a simulated net release.
 """
 
+from __future__ import annotations
+
 """Assess the immediate recoil in a simulated net release."""
 
 from dataclasses import dataclass, replace

@@ -3,6 +3,7 @@ A
 
 Gain and save all needed data for this program in this file.a
 """
+from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import numpy as np
