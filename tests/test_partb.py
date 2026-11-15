@@ -206,9 +206,9 @@ def test_nominal_run_hits_within_net_radius():
 
 # ---------------- Group 4: Part A input and net parameters ----------------
 
-def _space_object(position_km, velocity_km_s):
-    """Build a Part A SpaceObject at a fixed UTC time; position in km, velocity in km/s."""
-    return SpaceObject(name="TEST", time=datetime(2026, 11, 15, tzinfo=timezone.utc),
+def _space_object(position_km, velocity_km_s, norad_id=99999):
+    """Build a Part A SpaceObject at a fixed UTC time; position in km, velocity in km/s; 99999 = local test number."""
+    return SpaceObject(norad_id=norad_id, name="TEST", time=datetime(2026, 11, 15, tzinfo=timezone.utc),
                        position=np.asarray(position_km, dtype=float),
                        velocity=np.asarray(velocity_km_s, dtype=float), orientation=None)
 
