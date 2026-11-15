@@ -53,7 +53,7 @@ def calculate_state(record: dict[str, str], time_utc: datetime) -> SpaceObject:
     )
 
 def main():
-    user_input = input("Please enter NORAD_CAT_ID for the debris.:").strip()
+    user_input = input("Please enter NORAD_CAT_ID for the debris:").strip()
     if not user_input.isascii() or not user_input.isdecimal():
         print("Please enter the NORAD number using only digits.")
         return
@@ -75,5 +75,5 @@ def main():
     print(f"Velocity (vx, vy, vz), km/s:{debris.velocity}")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":#only run main when running this file
     main()
