@@ -17,23 +17,24 @@ from data_source import SpaceObject
 
 @dataclass(frozen=True)
 class ReleaseRecoil:
-    """Velocity vectors in the same coordinate frame as the input states."""
+    """Velocity vectors in the same coordinate frame as the input."""
 
-    recoil_delta_v_mps: np.ndarray
-    servicer_velocity_after_mps: np.ndarray
+    recoil_delta_v_mps: np.ndarray  # How much did the recoil change the satellite's speed
+    servicer_velocity_after_mps: np.ndarray  # full speed of the satellite after recoil
 
 
 def validate_postfire_inputs(
     servicer_before: SpaceObject,
     debris_before: SpaceObject,
-    *,
+    *, # include name for parameters under this
     net_speed_mps: float,
     release_direction: np.ndarray,
     direction_frame: str,
     servicer_mass_after_release_kg: float,
     net_mass_kg: float,
 ) -> None:
-    """Raise ValueError when the release inputs violate the handoff contract.
+    """
+    Raise ValueError when the release inputs violate the handoff contract.
 
     Both objects describe the same instant just before release. Positions are
     in metres and velocities are in metres per second. The release direction
@@ -77,7 +78,8 @@ def calculate_release_recoil(
     servicer_mass_after_release_kg: float,
     net_mass_kg: float,
 ) -> ReleaseRecoil:
-    """Compute the velocity change using an instantaneous separation model.
+    """
+    Compute the velocity change using an instantaneous separation model.
 
     Net speed is measured relative to the servicer immediately after release.
     The servicer and attached net share a velocity before separation.
