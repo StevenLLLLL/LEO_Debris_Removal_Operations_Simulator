@@ -15,12 +15,56 @@ import numpy as np
 from data_source import SpaceObject
 
 
+EARTH_MU_M3_S2 = 3.986004418e14
+EARTH_MEAN_RADIUS_M = 6_371_000.0
+
+
 @dataclass(frozen=True)
 class ReleaseRecoil:
     """Velocity vectors in the same coordinate frame as the input."""
 
     recoil_delta_v_mps: np.ndarray  # How much did the recoil change the satellite's speed
     servicer_velocity_after_mps: np.ndarray  # full speed of the satellite after recoil
+
+
+@dataclass(frozen=True)
+class OrbitAltitudes:
+    """
+    Heights above the spherical Earth reference surface, in metres. Include both lowest and highest altitude.
+    """
+
+    perigee_altitude_m: float
+    apogee_altitude_m: float
+
+
+@dataclass(frozen=True)
+class OrbitAltitudeChange:
+    before: OrbitAltitudes
+    after: OrbitAltitudes
+
+    @property
+    def perigee_change_m(self) -> float:
+        return self.after.perigee_altitude_m - self.before.perigee_altitude_m
+
+    @property
+    def apogee_change_m(self) -> float:
+        return self.after.apogee_altitude_m - self.before.apogee_altitude_m
+
+
+@dataclass(frozen=True)
+class CompensationBudget:
+    """Delta-v budget for immediate recoil compensation, in metres per second."""
+
+    required_delta_v_mps: float
+    available_delta_v_mps: float
+
+    @property
+    def margin_mps(self) -> float:
+        return self.available_delta_v_mps - self.required_delta_v_mps
+
+    @property
+    def budget_ok(self) -> bool:
+        return self.margin_mps >= 0.0
 
 
 def validate_postfire_inputs(
@@ -109,4 +153,87 @@ def calculate_release_recoil(
     return ReleaseRecoil(
         recoil_delta_v_mps=recoil_delta_v,
         servicer_velocity_after_mps=servicer_before.velocity + recoil_delta_v,
+    )
+
+
+def calculate_orbit_altitudes(
+    position: np.ndarray,
+    velocity: np.ndarray,
+) -> OrbitAltitudes:
+    """Estimate the two-body orbit's apsides from one Earth-centered state.
+
+    Position is in metres and velocity is in metres per second, expressed in
+    the same inertial coordinate frame. A negative altitude indicates that
+    the modeled orbit intersects the spherical Earth.
+    """
+    for name, vector in (("Position", position), ("Velocity", velocity)):
+        if vector.shape != (3,) or not np.isfinite(vector).all():
+            raise ValueError(f"{name} must contain three finite values.")
+
+    radius_m = float(np.linalg.norm(position))
+    if not isfinite(radius_m) or radius_m == 0:
+        raise ValueError("Distance from Earth's centre must be finite and positive.")
+
+    specific_energy = 0.5 * float(np.dot(velocity, velocity)) - EARTH_MU_M3_S2 / radius_m
+    if not isfinite(specific_energy) or specific_energy >= 0:
+        raise ValueError("A bound orbit is required to calculate a finite apogee.")
+
+    angular_momentum = np.cross(position, velocity)
+    angular_momentum_squared = float(np.dot(angular_momentum, angular_momentum))
+    if not isfinite(angular_momentum_squared) or angular_momentum_squared <= 0:
+        raise ValueError("A non-radial orbit is required to calculate the apsides.")
+
+    eccentricity_vector = (
+        np.cross(velocity, angular_momentum) / EARTH_MU_M3_S2
+        - position / radius_m
+    )
+    eccentricity = float(np.linalg.norm(eccentricity_vector))
+    semi_major_axis_m = -EARTH_MU_M3_S2 / (2 * specific_energy)
+    semi_latus_rectum_m = angular_momentum_squared / EARTH_MU_M3_S2
+
+    perigee_radius_m = semi_latus_rectum_m / (1 + eccentricity)
+    apogee_radius_m = 2 * semi_major_axis_m - perigee_radius_m
+    return OrbitAltitudes(
+        perigee_altitude_m=perigee_radius_m - EARTH_MEAN_RADIUS_M,
+        apogee_altitude_m=apogee_radius_m - EARTH_MEAN_RADIUS_M,
+    )
+
+
+def compare_release_orbit(
+    servicer_before: SpaceObject,
+    recoil: ReleaseRecoil,
+) -> OrbitAltitudeChange:
+    """Compare the servicer's orbit at the release instant, before and after recoil."""
+    if servicer_before.frame != "TEME":
+        raise ValueError("Release orbit comparison expects the servicer state in TEME.")
+
+    return OrbitAltitudeChange(
+        before=calculate_orbit_altitudes(
+            servicer_before.position, servicer_before.velocity
+        ),
+        after=calculate_orbit_altitudes(
+            servicer_before.position, recoil.servicer_velocity_after_mps
+        ),
+    )
+
+
+def check_compensation_budget(
+    recoil: ReleaseRecoil,
+    available_delta_v_mps: float,
+) -> CompensationBudget:
+    """Check the budget for an impulse that immediately cancels recoil."""
+    if not isfinite(available_delta_v_mps) or available_delta_v_mps < 0:
+        raise ValueError("Available delta-v must be finite and non-negative (m/s).")
+
+    recoil_vector = recoil.recoil_delta_v_mps
+    if recoil_vector.shape != (3,) or not np.isfinite(recoil_vector).all():
+        raise ValueError("Recoil delta-v must contain three finite values.")
+
+    required_delta_v_mps = float(np.linalg.norm(recoil_vector))
+    if not isfinite(required_delta_v_mps):
+        raise ValueError("Required delta-v must be finite (m/s).")
+
+    return CompensationBudget(
+        required_delta_v_mps=required_delta_v_mps,
+        available_delta_v_mps=available_delta_v_mps,
     )
