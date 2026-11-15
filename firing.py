@@ -16,16 +16,24 @@ Core idea:
         v_net = v0 - v_sat
 
     The net speed |v_net| must equal a given value, so we solve a 1-D root-finding problem in T (bisection).
+
+All inputs and outputs are in SI units (m, m/s, s, rad); fire_time is a UTC datetime.
 """
 
+# Lets type hints such as tuple[...] and dict[...] work on older Python versions
 from __future__ import annotations
 
+# dataclass: auto-generates the FiringSolution constructor
 from dataclasses import dataclass
+# datetime / timedelta: fire time = epoch (UTC) + seconds since start
 from datetime import datetime, timedelta
+# Optional[X]: marks a value that may be None (e.g. no epoch given)
 from typing import Optional
 
+# numpy: all matrix and vector calculations
 import numpy as np
 
+# Part B ④: navigation frames, sensor faults, the CW matrix and the proximity simulation
 from Location_of_us import NavFrame, SensorFaults, cw_stm, run_proximity
 
 DEFAULT_NET_SPEED = 20.0     # m/s, desired net speed
@@ -35,9 +43,9 @@ T_MIN, T_MAX = 1e-3, 5.0     # s, search range for time of flight
 
 @dataclass
 class FiringSolution:
-    """Interface 5."""
-    fire_time: Optional[datetime]   # UTC
-    direction_rsw: np.ndarray       # firing direction unit vector (RSW)
+    """Interface 5: the firing solution, produced by solve_firing() and read by C and the UI."""
+    fire_time: Optional[datetime]   # UTC fire time (epoch + frame.t); None if no epoch was given
+    direction_rsw: np.ndarray       # firing direction unit vector (RSW, unitless)
     azimuth: float                  # rad, measured from along-track, positive towards cross-track
     elevation: float                # rad, positive towards radial (away from Earth)
     net_speed: float                # m/s, net muzzle speed relative to the satellite
@@ -54,37 +62,64 @@ class FiringSolution:
 # CW targeting
 # ---------------------------------------------------------------------------
 def cw_targeting_velocity(r0: np.ndarray, n: float, T: float) -> np.ndarray:
-    """Relative velocity v0 needed to start from r0 and reach the origin after T seconds."""
+    """
+    Relative velocity needed to start from r0 and reach the target (origin) exactly T seconds later.
+
+    r0: start position relative to the target (m)
+    n:  target orbital angular rate (rad/s)
+    T:  time of flight (s)
+    Returns v0, the required velocity relative to the target (m/s).
+    Called by _speed_error() and solve_firing().
+    """
+    # Split Φ(T) into four 3x3 blocks; only the top two matter because we only need the final position:
+    # Φ_rr = how the start position moves the end position, Φ_rv = how the start velocity moves it
     phi = cw_stm(n, T)
     phi_rr = phi[:3, :3]
     phi_rv = phi[:3, 3:]
-    # use solve instead of an explicit inverse: numerically more stable, same result
+    # End position Φ_rr r0 + Φ_rv v0 = 0  ⇒  v0 = -Φ_rv⁻¹ Φ_rr r0.
+    # solve() gives the same result as an explicit inverse but is faster and more accurate
     return -np.linalg.solve(phi_rv, phi_rr @ r0)
 
 
 def _speed_error(T: float, r0, v_sat, n, net_speed) -> float:
-    """f(T) = |v0(T) - v_sat| - desired net speed. Smaller T needs a larger speed, so f is monotonically decreasing."""
+    """
+    How far the required launch speed for time of flight T is from the launcher's speed.
+
+    T: time of flight (s); r0: start position (m); v_sat: satellite relative velocity (m/s);
+    n: orbital rate (rad/s); net_speed: launcher speed (m/s)
+    Returns f(T) = |v0(T) - v_sat| - net_speed (m/s). Smaller T needs a larger speed, so f decreases monotonically.
+    Called by solve_time_of_flight().
+    """
     return float(np.linalg.norm(cw_targeting_velocity(r0, n, T) - v_sat) - net_speed)
 
 
 def solve_time_of_flight(r0, v_sat, n, net_speed,
                          t_min=T_MIN, t_max=T_MAX, tol=1e-9, max_iter=100):
     """
-    Bisection for T such that the net speed equals net_speed exactly.
-    Returns (T, converged). If the target cannot be reached within t_max (net too slow), converged = False.
+    Find the time of flight T for which the required launch speed equals the launcher's net_speed.
+
+    We must search for T because the launcher has a fixed speed: any T gives a valid aim, but only one T
+    matches that speed. f(T) decreases monotonically, so bisection always finds it if it exists.
+    r0: start position (m); v_sat: satellite relative velocity (m/s); n: orbital rate (rad/s);
+    net_speed: launcher speed (m/s); t_min, t_max: search range (s); tol: stop tolerance (s); max_iter: iteration cap
+    Returns (T in s, converged). converged = False if no root exists in [t_min, t_max],
+    i.e. even t_max is too short for this net speed (net too slow or target too far).
+    Called by solve_firing() and the tests.
     """
     f_lo = _speed_error(t_min, r0, v_sat, n, net_speed)
     f_hi = _speed_error(t_max, r0, v_sat, n, net_speed)
+    # A root exists only if f changes sign: f(t_min) >= 0 (too fast) and f(t_max) <= 0 (slow enough)
     if f_lo < 0 or f_hi > 0:
         return float("nan"), False   # no root in the interval
 
     lo, hi = t_min, t_max
+    # Each step halves the interval [lo, hi] that contains the root
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
         if _speed_error(mid, r0, v_sat, n, net_speed) > 0:
             lo = mid          # speed still too high → need a longer time of flight
         else:
-            hi = mid
+            hi = mid          # speed already low enough → the root is at or before mid
         if hi - lo < tol:
             break
     return 0.5 * (lo + hi), True
@@ -96,24 +131,31 @@ def solve_time_of_flight(r0, v_sat, n, net_speed,
 def miss_distance(sat_pos: np.ndarray, sat_vel: np.ndarray, v_net: np.ndarray,
                   n: float, T: float, samples: int = 300) -> float:
     """
-    Launch the net from the satellite position with (satellite velocity + v_net), propagate with CW up to 1.5T,
-    and find the minimum distance from the net to the target (origin).
+    Closest distance between the net and the target (origin) after launch.
 
-    When the "true" state is passed in, the result is the actual offset caused by the estimation error.
+    The net starts at sat_pos with velocity sat_vel + v_net and moves under CW up to 1.5T.
+    solve_firing() passes the TRUE state here while the aim used the ESTIMATED state,
+    so the result is the real miss caused by the estimation error.
+    sat_pos (m), sat_vel (m/s): satellite relative position and velocity; v_net (m/s): net velocity relative
+    to the satellite; n (rad/s): orbital rate; T (s): planned time of flight; samples: number of coarse samples
+    Returns the minimum distance (m).
+    Called by solve_firing() and the tests.
     """
+    # Net state right after launch: it inherits the satellite's velocity plus the launch velocity
     net_state = np.concatenate([sat_pos, sat_vel + v_net])
 
+    # Distance from the net to the target t seconds after launch (m)
     def dist(t: float) -> float:
         return float(np.linalg.norm((cw_stm(n, t) @ net_state)[:3]))
 
-    # step 1: coarse sampling to find roughly which interval contains the closest approach
+    # Step 1: coarse sampling finds roughly where the closest approach is (avoids missing it with local search alone)
     times = np.linspace(0.0, 1.5 * T, samples)
     dists = [dist(t) for t in times]
     i = int(np.argmin(dists))
     lo = times[max(i - 1, 0)]
     hi = times[min(i + 1, samples - 1)]
 
-    # step 2: refine within this small interval using ternary search (distance is unimodal near the closest approach)
+    # Step 2: ternary search refines it inside that small interval, where the distance has a single minimum
     for _ in range(60):
         m1 = lo + (hi - lo) / 3
         m2 = hi - (hi - lo) / 3
@@ -128,9 +170,19 @@ def miss_distance(sat_pos: np.ndarray, sat_vel: np.ndarray, v_net: np.ndarray,
 # Public main function
 # ---------------------------------------------------------------------------
 def direction_to_angles(d: np.ndarray) -> tuple[float, float]:
-    """RSW unit vector → (azimuth, elevation), in rad."""
-    elevation = float(np.arcsin(np.clip(d[0], -1.0, 1.0)))   # radial component
-    azimuth = float(np.arctan2(d[2], d[1]))                  # from S towards W
+    """
+    Convert a firing direction into pointing angles.
+
+    d: firing direction unit vector in RSW (unitless)
+    Returns (azimuth, elevation) in rad:
+        azimuth   = angle in the S-W plane, measured from along-track (S), positive towards cross-track (W)
+        elevation = angle above the S-W plane, positive towards radial (R, away from Earth)
+    Called by solve_firing().
+    """
+    # elevation from the radial component (clip guards against rounding just above 1)
+    elevation = float(np.arcsin(np.clip(d[0], -1.0, 1.0)))
+    # azimuth from the along-track and cross-track components, turning from S towards W
+    azimuth = float(np.arctan2(d[2], d[1]))
     return azimuth, elevation
 
 
@@ -138,14 +190,25 @@ def solve_firing(frame: NavFrame, n: float,
                  epoch: Optional[datetime] = None,
                  net_speed: float = DEFAULT_NET_SPEED) -> FiringSolution:
     """
-    Compute the firing solution from the latest navigation frame.
-    Targeting uses the estimated state (est_pos, est_vel); verification uses the true state (true_rel, true_vel).
-    epoch: epoch of the target state (A's TargetState.epoch); fire time = epoch + frame.t.
+    Compute the firing solution from one navigation frame (public interface).
+
+    frame:     the NavFrame to fire from (usually the first one that passes C's Go / No-Go)
+    n:         target orbital angular rate (rad/s)
+    epoch:     UTC start time of the proximity run; can be Part A's SpaceObject.time. fire time = epoch + frame.t
+    net_speed: launcher speed (m/s)
+    net_mass:  net mass (kg); only used for the momentum, it does not change the aim
+    net_radius_m, debris_radius_m: net and debris radii (m), used for capture_margin
+    deploy_time_s: time the net needs to open fully (s), used for deploy_ok
+    Returns a FiringSolution (SI units). Aiming uses the estimated state (est_pos, est_vel);
+    verification uses the true state (true_rel, true_vel).
+    Called by C's pipeline, monte_carlo() and the tests.
     """
+    # Step 1: aim from the filter's estimate (the only thing a real satellite knows)
     r0 = frame.est_pos
     v_sat = frame.est_vel
     fire_time = epoch + timedelta(seconds=frame.t) if epoch else None
 
+    # Step 2: find the time of flight that matches the launcher speed; report "no solution" if there is none
     T, ok = solve_time_of_flight(r0, v_sat, n, net_speed)
     if not ok:
         return FiringSolution(
@@ -156,11 +219,15 @@ def solve_firing(frame: NavFrame, n: float,
             message="No solution within the time-of-flight search range (net speed too low or distance too large)",
         )
 
+    # Step 3: velocity needed relative to the target, minus the satellite's own velocity,
+    # because the net inherits the satellite's velocity and the launcher only adds the difference
     v0 = cw_targeting_velocity(r0, n, T)
     v_net = v0 - v_sat
+    # Step 4: firing direction as a unit vector and as pointing angles
     d = v_net / np.linalg.norm(v_net)
     az, el = direction_to_angles(d)
 
+    # Step 5: check the shot against the true state to get the real miss distance (simulation only)
     miss = miss_distance(frame.true_rel, frame.true_vel, v_net, n, T)
 
     return FiringSolution(
@@ -185,12 +252,18 @@ def monte_carlo(n: float, noise_sigmas, runs: int = 200, steps: int = 60,
                 net_radius: float = DEFAULT_NET_RADIUS,
                 enforce_abort: bool = True) -> dict[float, dict]:
     """
-    Run `runs` times for each noise level (a different random seed each time).
+    Monte Carlo study: how sensor noise affects the capture success rate.
+
+    n: orbital rate (rad/s); noise_sigmas: sensor noise levels to test (m); runs: runs per noise level
+    (a different random seed each time); steps: steps per run (1 s each); net_speed (m/s);
+    net_radius_m, debris_radius_m: net and debris radii (m);
+    enforce_abort: True = respect the abort rules; False = ignore them and always fire,
+        used to plot the "pure physics" miss curve.
     Returns {noise σ: {"hit_rate", "abort_rate", "mean_miss"}}:
-        hit_rate   —— fraction of runs that fired and hit (miss distance < net radius)
+        hit_rate   —— fraction of runs that fired and captured (capture_margin > 0 and the net fully deployed)
         abort_rate —— fraction of runs where the system judged it unsafe and aborted
         mean_miss  —— mean miss distance (m) over the runs that actually fired
-    With enforce_abort=False the abort rules are ignored and it always fires, used to plot the "pure physics" miss curve.
+    Called by the UI / analysis scripts (not used in the main pipeline).
     """
     results = {}
     for sigma in noise_sigmas:
@@ -199,6 +272,7 @@ def monte_carlo(n: float, noise_sigmas, runs: int = 200, steps: int = 60,
         for seed in range(runs):
             frames = run_proximity(n, steps=steps, seed=seed,
                                    faults=SensorFaults(noise_sigma=sigma))
+            # fire from the last frame of each run
             last = frames[-1]
             if last.abort and enforce_abort:
                 aborts += 1
