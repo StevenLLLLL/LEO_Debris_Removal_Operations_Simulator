@@ -15,14 +15,22 @@ import warnings
 from dataclasses import dataclass, field
 # datetime / timedelta: fire time = epoch (UTC) + seconds since start
 from datetime import datetime, timedelta
-# Optional[X]: marks a value that may be None (e.g. no sensor reading during a dropout, or no epoch given)
-from typing import Optional
+# Optional[X]: marks a value that may be None (e.g. no sensor reading during a dropout, or no epoch given);
+# TYPE_CHECKING: True only for type checkers, so the import below costs nothing at run time
+from typing import TYPE_CHECKING, Optional
 
 # numpy: all matrix and vector calculations
 import numpy as np
 
-# Earth gravitational parameter μ (m^3/s^2), needed to get the orbital rate n from Part A's SpaceObject
-from config import MU_EARTH
+# Earth gravitational parameter μ (m^3/s^2), needed to get the orbital rate n from Part A's SpaceObject,
+# and the Part B constants, which live in config.py so the whole team reads them from one place
+from config import (DEBRIS_RADIUS_M, DEFAULT_DT, DEFAULT_STEPS, GATE_CHI2_3DOF_99, HOLD_POINT,
+                    LAUNCHER_ENERGY_J, MAX_DROPOUT_S, MAX_SIGMA_M, MU_EARTH, NET_DEPLOY_TIME_S,
+                    NET_MASS_KG, NET_RADIUS_M, SETTLE_TIME_S, T_MAX, T_MIN)
+
+# Part A's SpaceObject, used only in type hints; Part B does not depend on data_source at run time
+if TYPE_CHECKING:
+    from data_source import SpaceObject
 
 
 # ===========================================================================
@@ -46,19 +54,9 @@ from config import MU_EARTH
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Default parameters (can also be overridden by C's config.py and passed in)
+# Default parameters: HOLD_POINT, DEFAULT_DT, DEFAULT_STEPS, MAX_DROPOUT_S, MAX_SIGMA_M, SETTLE_TIME_S and
+# GATE_CHI2_3DOF_99 are defined in config.py ("Part B: Location of us") and imported at the top
 # ---------------------------------------------------------------------------
-HOLD_POINT = np.array([0.0, -10.0, 0.0])  # m, V-bar hold point: 10 m directly behind the target
-
-DEFAULT_DT = 1.0              # s, length of each time step (one sensor reading per step)
-DEFAULT_STEPS = 120           # number of steps (120 s): the longest we wait at the hold point, not a fixed fire time
-MAX_DROPOUT_S = 10.0          # s, continuous dropout longer than this → abort (dead reckoning no longer trusted)
-MAX_SIGMA_M = 1.0             # m, position uncertainty still above this after settling → abort (filter divergence)
-SETTLE_TIME_S = 15.0          # s, filter settling time after start; no uncertainty check before this
-
-# Threshold for "this reading is clearly wrong": chi-square, 3 DOF, 99% critical value.
-# A squared Mahalanobis distance of the innovation above it → bad data
-GATE_CHI2_3DOF_99 = 11.345
 
 
 # ---------------------------------------------------------------------------
@@ -516,17 +514,8 @@ def run_proximity_for_target(space_object, **kwargs) -> list[NavFrame]:
 # All inputs and outputs are in SI units (m, m/s, s, rad); fire_time is a UTC datetime.
 # ===========================================================================
 
-# ---- Net and debris parameters (assumed values; to be moved to config.py once the team agrees) ----
-# Net mass (kg), assumed
-NET_MASS_KG = 2.0
-# Net radius when fully deployed (m), assumed; a capture needs the net to cover the debris
-NET_RADIUS_M = 2.0
-# Time for the net to open fully after launch (s), assumed; a shorter flight hits with a half-open net
-NET_DEPLOY_TIME_S = 0.3
-# Kinetic energy the launcher gives the net (J), assumed; together with the mass it sets the net speed
-LAUNCHER_ENERGY_J = 400.0
-# Debris radius (m), assumed, because CelesTrak orbit data has no object size
-DEBRIS_RADIUS_M = 0.5
+# ---- Net and debris parameters (assumed values): NET_MASS_KG, NET_RADIUS_M, NET_DEPLOY_TIME_S,
+# LAUNCHER_ENERGY_J and DEBRIS_RADIUS_M are defined in config.py ("Part B: Firing solution and net parameters") ----
 
 
 def net_speed_from_energy(mass_kg: float, energy_j: float) -> float:
@@ -546,7 +535,7 @@ def net_speed_from_energy(mass_kg: float, energy_j: float) -> float:
 
 
 DEFAULT_NET_SPEED = net_speed_from_energy(NET_MASS_KG, LAUNCHER_ENERGY_J)   # m/s, net launch speed (20 m/s)
-T_MIN, T_MAX = 1e-3, 5.0     # s, search range for the net's time of flight (no solution if it needs longer)
+# T_MIN, T_MAX (s, time-of-flight search range) are defined in config.py
 
 
 @dataclass
@@ -773,6 +762,101 @@ def solve_firing(frame: NavFrame, n: float,
         net_momentum_rsw=net_momentum,
         capture_margin=capture_margin,
         deploy_ok=deploy_ok,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Choosing when to fire, and the single entry point for Part A's output
+# ---------------------------------------------------------------------------
+def first_firing_opportunity(frames: list[NavFrame], n: float,
+                             epoch: Optional[datetime] = None,
+                             net_speed: float = DEFAULT_NET_SPEED,
+                             min_fire_time_s: float = SETTLE_TIME_S) -> tuple[Optional[int], Optional[FiringSolution]]:
+    """
+    Scan the navigation frames from the start and return the first one that is safe to fire from.
+
+    frames:    NavFrame list from run_proximity() (one per second)
+    n:         target orbital angular rate (rad/s)
+    epoch:     UTC start time of the run (Part A's SpaceObject.time); fire time = epoch + frame.t
+    net_speed: launcher speed (m/s)
+    min_fire_time_s: earliest allowed fire time (s); earlier frames are skipped (not fired from, but not an abort)
+    A frame qualifies when: t >= min_fire_time_s, not aborted, converged, deploy_ok, and
+    NET_RADIUS_M - DEBRIS_RADIUS_M - miss_uncertainty > 0.
+    miss_uncertainty (3σ) is used instead of predicted_miss, because predicted_miss needs the simulation's
+    true state, which a real satellite does not have.
+    Returns (frame index, FiringSolution), or (None, None) if an abort happens first or no frame qualifies.
+    Called by run_part_b().
+    """
+    for i, frame in enumerate(frames):
+        # Once the run is aborted it stays aborted (see run_proximity), so stop scanning
+        if frame.abort:
+            return None, None
+        # The filter needs a settling period to estimate velocity from successive position readings.
+        # Firing before then would rely on the prior velocity (0 +/- 0.1 m/s), and the 3-sigma check only covers position uncertainty.
+        # Reusing SETTLE_TIME_S keeps the firing rule consistent with the abort rule.
+        if frame.t < min_fire_time_s:
+            continue
+        sol = solve_firing(frame, n, epoch=epoch, net_speed=net_speed)
+        # Real-mission capture check: the 3σ position error must still fit inside the net around the debris
+        if sol.converged and sol.deploy_ok and NET_RADIUS_M - DEBRIS_RADIUS_M - sol.miss_uncertainty > 0:
+            return i, sol
+    return None, None
+
+
+@dataclass
+class PartBResult:
+    """Everything Part B produces for one target, returned by run_part_b() and read by C and the UI."""
+    norad_id: int                             # NORAD catalogue number, copied from Part A's SpaceObject
+    name: str                                 # object name, copied from Part A's SpaceObject
+    epoch: datetime                           # UTC start time of the run (Part A's SpaceObject.time)
+    n: float                                  # rad/s, target orbital angular rate derived from Part A's state
+    frames: list[NavFrame]                    # one NavFrame per second of the proximity phase (SI units)
+    fire_index: Optional[int]                 # index in frames of the first firing opportunity; None if none
+    solution: Optional[FiringSolution]        # firing solution at fire_index; None if no opportunity
+    abort_reason: str                         # why there is no firing opportunity; empty if one was found
+
+
+def run_part_b(space_object: SpaceObject, faults: Optional[SensorFaults] = None,
+               seed: int = 42, min_fire_time_s: float = SETTLE_TIME_S) -> PartBResult:
+    """
+    Part B's single public entry point: from Part A's target state to a firing decision input for C.
+
+    space_object: Part A's SpaceObject, e.g. from app.calculate_state(); position in km, velocity in km/s,
+                  frame "TEME", time in UTC. Part B converts to m and m/s at this entry point.
+    faults:       sensor fault-injection parameters; None means no faults
+    seed:         random seed for a reproducible run
+    min_fire_time_s: earliest allowed fire time (s), passed to first_firing_opportunity()
+    Returns a PartBResult; all its numbers are in SI units (m, m/s, s, rad), fire_time is UTC.
+    Raises ValueError if the frame is not TEME or the state is not a plausible closed Earth orbit.
+    Called by C's pipeline.
+    """
+    # The vis-viva step needs a geocentric inertial state; TEME is what Part A's SGP4 output uses
+    if space_object.frame != "TEME":
+        raise ValueError(f"Part B needs a TEME state from Part A; got frame '{space_object.frame}'")
+    # space_object.orientation is not used: the relative navigation only needs position and velocity
+
+    # Step 1: orbital rate n (rad/s) from Part A's km / km/s state (unit conversion happens inside)
+    n = mean_motion_from_space_object(space_object)
+    # Step 2: simulate the proximity phase at the hold point
+    frames = run_proximity_for_target(space_object, faults=faults, seed=seed)
+    # Step 3: first frame that is safe to fire from; fire time is measured from Part A's state time
+    fire_index, solution = first_firing_opportunity(frames, n, epoch=space_object.time,
+                                                    min_fire_time_s=min_fire_time_s)
+
+    if fire_index is not None:
+        abort_reason = ""
+    else:
+        abort_reason = frames[-1].abort_reason or "No frame met the firing criteria within the time window"
+
+    return PartBResult(
+        norad_id=space_object.norad_id,
+        name=space_object.name,
+        epoch=space_object.time,
+        n=n,
+        frames=frames,
+        fire_index=fire_index,
+        solution=solution,
+        abort_reason=abort_reason,
     )
 
 

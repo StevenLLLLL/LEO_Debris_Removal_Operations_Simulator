@@ -16,11 +16,29 @@ All Part B code lives in firing.py, as specified by the team's file structure.
 - Hold point: `(0, -10, 0)` m, on the V-bar 10 m behind the target.
 - Input SpaceObject from Part A is in km and km/s; Part B converts to m and m/s at the entry point. All Part B outputs (NavFrame, FiringSolution) are in SI units (m, m/s, s, rad).
 
-### Public functions
+### Public interface
 
 ```python
-from firing import run_proximity_for_target, solve_firing
+from firing import run_part_b
+result = run_part_b(space_object)   # space_object: output of Part A's calculate_state()
 ```
+
+`run_part_b(space_object, faults=None, seed=42)` is Part B's single entry point. Input: Part A's `SpaceObject` (km, km/s, frame `TEME`, UTC time; `orientation` is not used). Part B converts units at the entry point and raises `ValueError` if the frame is not `TEME`. It simulates the proximity phase, then scans the frames from the start and picks the first one that is not aborted, converged, `deploy_ok`, and has `NET_RADIUS_M - DEBRIS_RADIUS_M - miss_uncertainty > 0`.
+
+`PartBResult` fields:
+
+| Field | Type | Unit | Meaning |
+|---|---|---|---|
+| `norad_id` | int | — | NORAD number, copied from Part A |
+| `name` | str | — | object name, copied from Part A |
+| `epoch` | datetime | UTC | Part A's `SpaceObject.time`; fire time = `epoch + frame.t` |
+| `n` | float | rad/s | target orbital angular rate |
+| `frames` | list[NavFrame] | SI | one frame per second of the proximity phase |
+| `fire_index` | int or None | — | index in `frames` of the first firing opportunity |
+| `solution` | FiringSolution or None | SI | firing solution at `fire_index` |
+| `abort_reason` | str | — | why there is no opportunity (last frame's abort reason, or "No frame met the firing criteria within the time window"); empty if one was found |
+
+### Lower-level functions
 
 - `run_proximity(n, ...)` → `list[NavFrame]` (one frame per time step; `n` is the target's orbital rate in rad/s, e.g. from `mean_motion_from_space_object()`).
 - `run_proximity_for_target(space_object, ...)` → `list[NavFrame]`: same as `run_proximity`, but takes Part A's `SpaceObject` and computes `n` from its position and velocity (vis-viva, `MU_EARTH` from `config.py`).
@@ -41,7 +59,7 @@ from firing import run_proximity_for_target, solve_firing
 
 ### Net parameters
 
-Defined at the start of section ⑤ in `firing.py` for now (to be moved to `config.py` once the team agrees). The net speed is derived from mass and energy: `v = sqrt(2E / m)`.
+Defined in `config.py` under "Part B: Firing solution and net parameters" (the navigation constants are under "Part B: Location of us"); `DEFAULT_NET_SPEED` stays in `firing.py`. The net speed is derived from mass and energy: `v = sqrt(2E / m)`.
 
 | Name | Value | Unit | Note |
 |---|---|---|---|
